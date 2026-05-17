@@ -38,6 +38,7 @@ def create_extract_fixture(db_path: Path, photo_path: Path) -> None:
             "Арт. 1550292417 14 157₽\n\n"
             "Диван Divan.ru\n"
             "Слипсон Вельвет Зеленый 64 990₽\n\n"
+            "🌱Диваны, стулья, столик, тумба Divan.ru 242 440₽\n\n"
             "Цвет стен G482"
         )
         conn.execute(
@@ -85,12 +86,15 @@ def test_extract_facts_command_creates_expected_outputs(tmp_path: Path) -> None:
 
     expected_files = {
         "summary.md",
-        "extracted_facts.csv",
+        "extraction_quality_summary.md",
+        "extracted_facts_all.csv",
+        "extracted_facts_clean.csv",
+        "extracted_facts_needs_review.csv",
         "extracted_facts.jsonl",
         "extracted_facts.sqlite",
     }
     assert expected_files <= {path.name for path in out_dir.iterdir()}
-    assert {
+    category_files = {
         "flooring.md",
         "wall_colors.md",
         "kitchens.md",
@@ -99,19 +103,32 @@ def test_extract_facts_command_creates_expected_outputs(tmp_path: Path) -> None:
         "sofas.md",
         "hallway.md",
         "living_room_furniture.md",
-        "needs_review.md",
-    } <= {path.name for path in (out_dir / "by_category").iterdir()}
+    }
+    assert category_files <= {path.name for path in (out_dir / "by_category").iterdir()}
+    assert category_files <= {path.name for path in (out_dir / "by_category_clean").iterdir()}
+    assert category_files <= {path.name for path in (out_dir / "by_category_needs_review").iterdir()}
 
-    with (out_dir / "extracted_facts.csv").open("r", encoding="utf-8", newline="") as fh:
+    with (out_dir / "extracted_facts_all.csv").open("r", encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
+    with (out_dir / "extracted_facts_clean.csv").open("r", encoding="utf-8", newline="") as fh:
+        clean_rows = list(csv.DictReader(fh))
+    with (out_dir / "extracted_facts_needs_review.csv").open("r", encoding="utf-8", newline="") as fh:
+        review_rows = list(csv.DictReader(fh))
 
     assert len(rows) >= 5
     assert any(row["category"] == "kitchens" and row["item_type"] == "kitchen_facades" for row in rows)
     assert any(row["category"] == "sofas" and row["vendor_normalized"] == "Divan.ru" for row in rows)
     assert any(row["category"] == "wall_colors" and row["color_code"] == "G482" for row in rows)
+    assert any(row["item_type"] == "bundle_purchase" and row["needs_review"] == "1" for row in review_rows)
+    assert all(row["needs_review"] == "0" for row in clean_rows)
+    assert all(row["needs_review"] == "1" for row in review_rows)
+    assert not any(row["item_type"] == "bundle_purchase" for row in clean_rows)
 
     with sqlite3.connect(out_dir / "extracted_facts.sqlite") as conn:
         fact_count = conn.execute("SELECT COUNT(*) FROM extracted_facts").fetchone()[0]
 
     assert fact_count == len(rows)
-    assert "Total facts extracted" in (out_dir / "summary.md").read_text(encoding="utf-8")
+    summary = (out_dir / "summary.md").read_text(encoding="utf-8")
+    assert "Total facts extracted" in summary
+    assert "Clean facts" in summary
+    assert "Needs review" in summary

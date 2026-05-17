@@ -73,7 +73,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     extract_parser.add_argument("--limit", type=int)
     extract_parser.add_argument("--min-project-article-score", type=int, default=2)
-    extract_parser.add_argument("--include-needs-review", action="store_true")
+    extract_parser.add_argument(
+        "--include-needs-review",
+        action="store_true",
+        help="Deprecated no-op: all rows are now always written, with clean/review split files.",
+    )
     extract_parser.add_argument(
         "--format",
         choices=["markdown", "csv", "jsonl", "sqlite", "all"],
@@ -152,6 +156,7 @@ def run_extract_facts(args: argparse.Namespace) -> None:
     print(f"Wrote extracted fact outputs: {args.out_dir.resolve()}")
     print(f"Source posts processed: {result.source_posts_processed}")
     print(f"Extracted facts: {len(result.facts)}")
+    print(f"Clean facts: {sum(1 for fact in result.facts if not fact.needs_review)}")
     print(f"Needs review: {sum(1 for fact in result.facts if fact.needs_review)}")
     for category_id in [
         "flooring",

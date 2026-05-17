@@ -18,7 +18,10 @@ from .candidate_mining import (
 )
 from .categories import load_category_configs
 from .extraction_patterns import (
+    ARTICLE_RE,
     CONFIDENCE_SORT_VALUE,
+    PRICE_RE,
+    PROMO_RE,
     STRICT_CATEGORIES,
     count_item_triggers,
     detect_brand,
@@ -29,7 +32,6 @@ from .extraction_patterns import (
     parse_price,
     parse_project_name,
     parse_promo_code,
-    remove_price_and_article,
     suspiciously_long_descriptor,
     without_promos,
 )
@@ -162,6 +164,106 @@ CSV_FIELDNAMES = [
 ]
 
 
+WORD_CHARS = r"A-Za-zА-Яа-яЁё0-9"
+
+
+@dataclass(frozen=True)
+class BundleDetection:
+    evidence_quote: str
+    item_heads: tuple[str, ...]
+    category: str
+    room_contexts: tuple[str, ...]
+
+
+BUNDLE_ITEM_HEAD_PATTERNS: tuple[tuple[str, str, str], ...] = (
+    ("кухня", "kitchens", r"кухн(?:я|и|ю|ей)?"),
+    ("фасады", "kitchens", r"фасад(?:ы|а|ов)?"),
+    ("фартук", "kitchens", r"фартук(?:а|и)?"),
+    ("диван", "sofas", r"диван(?:ы|а)?"),
+    ("софа", "sofas", r"софа|софы"),
+    ("кровать", "sofas", r"кровать(?:-трансформер)?|кровати|кроватью"),
+    ("стол", "tables", r"стол(?:ы|а|у|ом|е)?"),
+    ("столик", "tables", r"столик(?:и|а|ом|е)?"),
+    ("стул", "chairs", r"стул(?:ья|ьев|а|ом|е)?"),
+    ("кресло", "chairs", r"кресл(?:о|а|ом|е)?"),
+    ("тумба", "living_room_furniture", r"тумб(?:а|ы|у|ой|очка|очки|очку|очкой)?"),
+    ("мебель", "living_room_furniture", r"мебел(?:ь|и|ью)?"),
+    ("комод", "living_room_furniture", r"комод(?:ы|а|ом|е)?"),
+    ("шкаф", "living_room_furniture", r"шкаф(?:ы|а|ом|е|чик|чики|чика|чиком)?"),
+    ("стеллаж", "living_room_furniture", r"стеллаж(?:и|а|ом|е)?"),
+    ("полка", "living_room_furniture", r"полк(?:а|и|у|ой)?"),
+    ("обувница", "hallway", r"обувниц(?:а|ы|у|ей)?"),
+    ("консоль", "hallway", r"консол(?:ь|и|ью)?"),
+    ("вешалка", "hallway", r"вешалк(?:а|и|у|ой)?"),
+    ("пуф", "hallway", r"пуф(?:ы|а|ом|е)?"),
+    ("банкетка", "hallway", r"банкетк(?:а|и|у|ой)?"),
+    ("зеркало", "hallway", r"зеркал(?:о|а|ом|е)?"),
+    ("ковер", "living_room_furniture", r"ков(?:е|ё)р|ковр(?:ы|а|ов|ом|е)?"),
+    ("картина", "living_room_furniture", r"картин(?:а|ы|у|ой)?"),
+    ("подушка", "living_room_furniture", r"подушк(?:а|и|у|ой)?"),
+    ("плед", "living_room_furniture", r"плед(?:ы|а|ом|е)?"),
+    ("плитка", "flooring", r"плитк(?:а|и|у|ой)?"),
+    ("керамогранит", "flooring", r"керамогранит(?:а|ом|е)?"),
+    ("кварцвинил", "flooring", r"кварц[\s-]?винил|кварцвинил(?:а|ом|е)?"),
+    ("ламинат", "flooring", r"ламинат(?:а|ом|е)?"),
+    ("паркет", "flooring", r"паркет(?:а|ом|е)?"),
+)
+
+BUNDLE_WORD_RE = re.compile(
+    rf"(?i)(?<![{WORD_CHARS}])(комплект|набор|гарнитур|все\s+для|всё\s+для)(?![{WORD_CHARS}])"
+)
+BUNDLE_LIST_RE = re.compile(r"[,;/]|\s+\+\s+|\s+и\s+", re.IGNORECASE)
+
+LIGHTING_WORD_RE = re.compile(
+    rf"(?i)(?<![{WORD_CHARS}])(лампа|светильник|люстра|бра|торшер|подсветка)(?![{WORD_CHARS}])"
+)
+DECOR_WORD_RE = re.compile(
+    rf"(?i)(?<![{WORD_CHARS}])(картина|постер|ковер|ковёр|декор|ваза)(?![{WORD_CHARS}])"
+)
+
+ROOM_CONTEXT_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("bathroom", r"ванн\w*|сануз\w*|душев\w*|туалет\w*"),
+    ("bedroom", r"спальн\w*"),
+    ("kids_room", r"детск\w*"),
+    ("wardrobe", r"гардероб\w*"),
+    ("hallway", r"прихож\w*|коридор\w*"),
+    ("living_room", r"гостин\w*"),
+    ("kitchen", r"кухн\w*"),
+)
+NON_TARGET_REVIEW_CONTEXTS = {"bathroom", "bedroom", "kids_room", "wardrobe"}
+NON_TARGET_REVIEW_CATEGORIES = {
+    "hallway",
+    "living_room_furniture",
+    "tables",
+    "sofas",
+    "chairs",
+    "kitchens",
+}
+
+SUSPICIOUS_DESCRIPTOR_PREFIXES = (
+    "ья",
+    "ье",
+    "ью",
+    "ом",
+    "ик",
+    "ьная",
+    "ого",
+    "ыми",
+    "ая лампа",
+    "ьная лампа",
+)
+
+ITEM_BOUNDARY_RE = re.compile(
+    rf"(?i)(?<![{WORD_CHARS}])("
+    r"кухн(?:я|и|ю|ей)?|фасад(?:ы|а|ов)?|фартук(?:а|и)?|стол(?:ы|а|у|ом|е)?|"
+    r"столик(?:и|а|ом|е)?|диван(?:ы|а)?|софа|кресл(?:о|а)|стул(?:ья|ьев|а)?|"
+    r"плитк(?:а|и|у)|керамогранит|кварц[\s-]?винил|ламинат|паркет|"
+    r"прихож\w*|обувниц\w*|зеркал\w*|вешалк\w*|пуф\w*|банкетк\w*|консол\w*|"
+    r"тв\s*тумб\w*|тумб\w*|комод\w*|стеллаж\w*|полк\w*|шкаф\w*|цвет\s+стен"
+    rf")(?![{WORD_CHARS}])"
+)
+
+
 def extract_facts(
     db_path: Path,
     out_dir: Path,
@@ -174,6 +276,7 @@ def extract_facts(
     photos_per_post: int = 3,
 ) -> FactExtractionResult:
     out_dir.mkdir(parents=True, exist_ok=True)
+    cleanup_legacy_extraction_outputs(out_dir)
     generated_at = utc_now_iso()
     posts, total_text_posts, total_posts_with_photos = load_source_posts(
         db_path,
@@ -200,15 +303,21 @@ def extract_facts(
         )
 
     facts = deduplicate_facts(facts)
-    if not include_needs_review:
-        facts = [fact for fact in facts if not fact.needs_review]
     facts = sort_facts(facts)
+    clean_facts = [fact for fact in facts if not fact.needs_review]
+    review_facts = [fact for fact in facts if fact.needs_review]
 
     output_files: list[Path] = []
     if output_format in {"csv", "all"}:
-        csv_path = out_dir / "extracted_facts.csv"
-        write_facts_csv(facts, csv_path)
-        output_files.append(csv_path)
+        csv_specs = [
+            ("extracted_facts_all.csv", facts),
+            ("extracted_facts_clean.csv", clean_facts),
+            ("extracted_facts_needs_review.csv", review_facts),
+        ]
+        for filename, rows in csv_specs:
+            csv_path = out_dir / filename
+            write_facts_csv(rows, csv_path)
+            output_files.append(csv_path)
     if output_format in {"jsonl", "all"}:
         jsonl_path = out_dir / "extracted_facts.jsonl"
         write_facts_jsonl(facts, jsonl_path)
@@ -223,7 +332,9 @@ def extract_facts(
             settings={
                 "limit": limit,
                 "min_project_article_score": min_project_article_score,
-                "include_needs_review": include_needs_review,
+                "include_needs_review": "deprecated_noop_all_rows_are_always_written"
+                if include_needs_review
+                else False,
                 "format": output_format,
             },
             created_at=generated_at,
@@ -254,6 +365,17 @@ def extract_facts(
         facts=result.facts,
         output_files=output_files,
     )
+
+
+def cleanup_legacy_extraction_outputs(out_dir: Path) -> None:
+    for legacy_path in [
+        out_dir / "extracted_facts.csv",
+        out_dir / "by_category" / "needs_review.md",
+    ]:
+        try:
+            legacy_path.unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 def select_source_posts(
@@ -312,6 +434,111 @@ def is_high_confidence_candidate_post(
     return False
 
 
+def word_re(pattern: str) -> re.Pattern[str]:
+    return re.compile(rf"(?i)(?<![{WORD_CHARS}])(?:{pattern})(?![{WORD_CHARS}])")
+
+
+def has_word_pattern(text: str, pattern: str) -> bool:
+    return bool(word_re(pattern).search(text))
+
+
+def detect_room_contexts(text: str) -> list[str]:
+    contexts: list[str] = []
+    for room_context, pattern in ROOM_CONTEXT_PATTERNS:
+        if re.search(rf"(?i)(?<![{WORD_CHARS}])(?:{pattern})(?![{WORD_CHARS}])", text):
+            contexts.append(room_context)
+    return contexts
+
+
+def first_non_target_room_context(text: str) -> str | None:
+    for room_context in detect_room_contexts(text):
+        if room_context in NON_TARGET_REVIEW_CONTEXTS:
+            return room_context
+    return None
+
+
+def has_lighting_or_decor(text: str) -> bool:
+    return bool(LIGHTING_WORD_RE.search(text) or DECOR_WORD_RE.search(text))
+
+
+def find_bundle_item_heads(text: str) -> list[tuple[int, str, str]]:
+    matches: list[tuple[int, str, str]] = []
+    for item_head, category, pattern in BUNDLE_ITEM_HEAD_PATTERNS:
+        for match in word_re(pattern).finditer(text):
+            matches.append((match.start(), item_head, category))
+    return sorted(matches, key=lambda item: item[0])
+
+
+def bundle_candidate_texts(block: str) -> list[str]:
+    lines = [compact_whitespace(line.strip(" \t-*•🌱")) for line in block.splitlines() if line.strip()]
+    candidates = [line for line in lines if line]
+    if len(lines) <= 2:
+        whole_block = compact_whitespace(block)
+        if whole_block and whole_block not in candidates:
+            candidates.append(whole_block)
+    return candidates
+
+
+def detect_bundle_purchase(block: str) -> BundleDetection | None:
+    for candidate in bundle_candidate_texts(block):
+        item_matches = find_bundle_item_heads(candidate)
+        if not item_matches:
+            continue
+        item_heads = tuple(dict.fromkeys(item_head for _, item_head, _ in item_matches))
+        item_head_set = set(item_heads)
+        candidate_lowered = normalize_for_match(candidate)
+        if item_head_set <= {"кухня", "фасады"}:
+            continue
+        if "фартук" in item_head_set and ({"плитка", "фартук"} & item_head_set):
+            continue
+        if "столешниц" in candidate_lowered and item_head_set <= {"кухня", "стол"}:
+            continue
+        distinct_item_count = len(item_heads)
+        room_contexts = tuple(detect_room_contexts(candidate))
+        has_bundle_word = bool(BUNDLE_WORD_RE.search(candidate))
+        has_list = bool(BUNDLE_LIST_RE.search(candidate))
+        has_price_or_vendor = bool(parse_price(candidate) or parse_article_id(candidate) or find_vendor(candidate))
+        repeated_item_head = len(item_matches) >= 2
+
+        if not (
+            (distinct_item_count >= 2 and (has_list or has_bundle_word or has_price_or_vendor))
+            or (has_bundle_word and item_matches)
+            or (len(room_contexts) >= 2 and repeated_item_head and (has_list or has_price_or_vendor))
+            or (len(room_contexts) >= 2 and has_price_or_vendor)
+        ):
+            continue
+
+        first_category = item_matches[0][2]
+        if "hallway" in room_contexts and first_category == "living_room_furniture":
+            first_category = "hallway"
+        return BundleDetection(
+            evidence_quote=candidate,
+            item_heads=item_heads,
+            category=first_category,
+            room_contexts=room_contexts,
+        )
+    return None
+
+
+def make_bundle_fact(detection: BundleDetection, **context: Any) -> ExtractedFact:
+    room_context = ",".join(detection.room_contexts) if detection.room_contexts else None
+    notes = "bundle purchase: detected item heads " + ", ".join(detection.item_heads)
+    if detection.room_contexts:
+        notes += "; room contexts " + ", ".join(detection.room_contexts)
+    return make_product_fact(
+        detection.evidence_quote,
+        category=detection.category,
+        item_type="bundle_purchase",
+        item_name=", ".join(detection.item_heads),
+        room_context=room_context,
+        extraction_method="regex:bundle_purchase",
+        confidence_hint="medium",
+        extra_needs_review=True,
+        notes=notes,
+        **context,
+    )
+
+
 def extract_facts_from_text(
     *,
     text: str,
@@ -339,6 +566,21 @@ def extract_facts_from_text(
                 first_photo_path=first_photo_path,
             )
         )
+        bundle_detection = detect_bundle_purchase(block)
+        if bundle_detection is not None:
+            facts.append(
+                make_bundle_fact(
+                    bundle_detection,
+                    source_message_id=source_message_id,
+                    date=date,
+                    source_scope=source_scope,
+                    project_name=project_name,
+                    source_text_hash=source_text_hash,
+                    created_at=created_at,
+                    first_photo_path=first_photo_path,
+                )
+            )
+            continue
         for extractor in (
             extract_kitchen_fact,
             extract_table_fact,
@@ -471,6 +713,28 @@ def extract_wall_color_facts(
 
 def extract_kitchen_fact(block: str, **context: Any) -> ExtractedFact | None:
     lowered = normalize_for_match(block)
+    if LIGHTING_WORD_RE.search(block):
+        return make_product_fact(
+            block,
+            category="kitchens",
+            item_type="kitchen_other",
+            extraction_method="regex:kitchen_lighting_review",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="lighting/decor kitchen context needs review",
+            **context,
+        ) if "кухн" in lowered else None
+    if has_word_pattern(block, r"ручк(?:а|и|у|ой)|смесител(?:ь|и|я|ем)|мойк(?:а|и|у|ой)") and "кухн" in lowered:
+        return make_product_fact(
+            block,
+            category="kitchens",
+            item_type="kitchen_accessory",
+            extraction_method="regex:kitchen_accessory_review",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="kitchen accessory outside current clean summary scope",
+            **context,
+        )
     if "фартук" in lowered:
         return make_product_fact(
             block,
@@ -503,23 +767,71 @@ def extract_kitchen_fact(block: str, **context: Any) -> ExtractedFact | None:
             finish=finish,
             extraction_method="regex:kitchen_facades",
             confidence_hint="high" if finish else "medium",
+            extra_needs_review=not bool(finish),
+            notes="kitchen facades without parsed finish" if not finish else None,
+            **context,
+        )
+    kitchen_purchase_signal = any(
+        marker in lowered
+        for marker in ["гарнитур", "на заказ", "мебель", "mebel.in", "кухня"]
+    ) and (parse_price(block) or find_vendor(block))
+    if kitchen_purchase_signal:
+        return make_product_fact(
+            block,
+            category="kitchens",
+            item_type="kitchen_purchase",
+            extraction_method="regex:kitchen_purchase",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="broad kitchen purchase row needs review unless validated against facades/countertop/backsplash",
             **context,
         )
     return make_product_fact(
         block,
         category="kitchens",
-        item_type="kitchen",
-        extraction_method="regex:kitchen",
+        item_type="kitchen_other",
+        extraction_method="regex:kitchen_other_review",
         confidence_hint="medium",
+        extra_needs_review=True,
+        notes="broad kitchen context without facade/countertop/backsplash signal",
         **context,
     )
 
 
 def extract_table_fact(block: str, **context: Any) -> ExtractedFact | None:
     lowered = normalize_for_match(block)
-    if "стол" not in lowered and "подстоль" not in lowered:
+    has_table_head = has_word_pattern(
+        block,
+        r"журнальн(?:ый|ого|ому|ым)?\s+столик|обеденн(?:ый|ого|ому|ым)?\s+стол|"
+        r"кухонн(?:ый|ого|ому|ым)?\s+стол|рабоч(?:ий|его|ему|им)?\s+стол|"
+        r"подстолье|столик(?:и|а|ом|е)?|стол(?:ы|а|у)?",
+    )
+    has_table_context = has_word_pattern(block, r"столом|столе")
+    if not has_table_head:
+        if has_table_context and LIGHTING_WORD_RE.search(block):
+            return make_product_fact(
+                block,
+                category="tables",
+                item_type="table_context_match",
+                extraction_method="regex:table_context_review",
+                confidence_hint="medium",
+                extra_needs_review=True,
+                notes="lighting/decor line mentions table only as context",
+                **context,
+            )
         return None
-    if "столешниц" in lowered and "кухн" in lowered:
+    if LIGHTING_WORD_RE.search(block):
+        return make_product_fact(
+            block,
+            category="tables",
+            item_type="table_context_match",
+            extraction_method="regex:table_lighting_review",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="lighting/decor line is not a clean table fact",
+            **context,
+        )
+    if "столешниц" in lowered:
         return None
     item_type = "table"
     if "журналь" in lowered:
@@ -543,6 +855,8 @@ def extract_table_fact(block: str, **context: Any) -> ExtractedFact | None:
             "рабочий стол",
             "столешница",
             "подстолье",
+            "журнальный столик",
+            "столик",
             "стол",
         ],
     )
@@ -560,14 +874,54 @@ def extract_table_fact(block: str, **context: Any) -> ExtractedFact | None:
 
 def extract_sofa_fact(block: str, **context: Any) -> ExtractedFact | None:
     lowered = normalize_for_match(block)
-    if not any(marker in lowered for marker in ["диван", "софа"]):
+    has_sofa_head = has_word_pattern(block, r"диван(?:ы|а)?|софа|диван-кровать|кровать-диван")
+    has_sofa_context = has_word_pattern(block, r"диваном|дивана|диване")
+    if not has_sofa_head:
+        if has_sofa_context and (
+            has_lighting_or_decor(block)
+            or re.search(r"(?i)\b(над|за|у|рядом\s+с|возле|с)\s+диван", block)
+        ):
+            return make_product_fact(
+                block,
+                category="sofas",
+                item_type="sofa_context_match",
+                extraction_method="regex:sofa_context_review",
+                confidence_hint="medium",
+                extra_needs_review=True,
+                notes="line mentions sofa only as surrounding context",
+                **context,
+            )
         return None
+    if re.search(r"(?i)\b(над|за|у|рядом\s+с|возле)\s+диван", block):
+        return make_product_fact(
+            block,
+            category="sofas",
+            item_type="sofa_context_match",
+            extraction_method="regex:sofa_context_review",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="line mentions sofa only as surrounding context",
+            **context,
+        )
+    if re.search(r"(?i)\bкровать\b.{0,40}\bс\s+диван", block) and not re.search(
+        r"(?i)^\s*диван[-\s]?кровать\b", block
+    ):
+        return make_product_fact(
+            block,
+            category="sofas",
+            item_type="sofa_context_match",
+            extraction_method="regex:sofa_bed_context_review",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="bed line mentions sofa as part of another item",
+            **context,
+        )
     item_type = "sofa"
     if "диван-кровать" in lowered or "кровать-диван" in lowered:
         item_type = "sofa_bed"
     elif "софа" in lowered:
         item_type = "couch"
-    descriptor = descriptor_after_keywords(block, ["диван-кровать", "кровать-диван", "диван", "софа"])
+    descriptor = descriptor_after_keywords(block, ["диван-кровать", "кровать-диван", "диваны", "диван", "софа"])
     model, material, color = split_model_material_color(descriptor)
     notes: list[str] = []
     if suspiciously_long_descriptor(descriptor):
@@ -601,7 +955,7 @@ def extract_chair_fact(block: str, **context: Any) -> ExtractedFact | None:
         item_type = "dining_chair"
     descriptor = descriptor_after_keywords(
         block,
-        ["рабочее кресло", "кресло", "обеденный стул", "кухонный стул", "стул", "стулья"],
+        ["рабочее кресло", "кресло", "обеденные стулья", "обеденный стул", "кухонные стулья", "кухонный стул", "стулья", "стул"],
     )
     model, material, color = split_model_material_color(descriptor)
     return make_product_fact(
@@ -620,6 +974,8 @@ def extract_chair_fact(block: str, **context: Any) -> ExtractedFact | None:
 
 def extract_flooring_fact(block: str, **context: Any) -> ExtractedFact | None:
     lowered = normalize_for_match(block)
+    if "фартук" in lowered:
+        return None
     has_floor_context = any(
         marker in lowered
         for marker in [
@@ -643,7 +999,7 @@ def extract_flooring_fact(block: str, **context: Any) -> ExtractedFact | None:
     )
     if not has_floor_context:
         return None
-    if "фартук" in lowered and not any(marker in lowered for marker in ["на полу", "на пол", "для пола"]):
+    if not (parse_price(block) or parse_article_id(block) or find_vendor(block)):
         return None
 
     item_type = "flooring_unclear"
@@ -660,13 +1016,20 @@ def extract_flooring_fact(block: str, **context: Any) -> ExtractedFact | None:
 
     room_context = None
     needs_review = False
-    if any(marker in lowered for marker in ["ванн", "сануз", "душев"]):
-        room_context = "bathroom"
+    flooring_review_notes: list[str] = []
+    non_target_contexts = [
+        detected_context
+        for detected_context in detect_room_contexts(block)
+        if detected_context in NON_TARGET_REVIEW_CONTEXTS
+    ]
+    if non_target_contexts:
+        room_context = non_target_contexts[0]
         needs_review = True
+        flooring_review_notes.append("flooring row has non-target room context: " + ", ".join(non_target_contexts))
 
     descriptor = descriptor_after_keywords(
         block,
-        ["плитка на полу", "плитка на пол", "керамогранит", "кварцвинил", "ламинат", "паркет"],
+        ["плитка на полу", "плитка на пол", "плитка для пола", "керамогранит", "кварцвинил", "кварц винил", "spc ламинат", "ламинат", "паркет"],
     )
     return make_product_fact(
         block,
@@ -678,7 +1041,7 @@ def extract_flooring_fact(block: str, **context: Any) -> ExtractedFact | None:
         extraction_method="regex:flooring",
         confidence_hint="medium" if needs_review else "high",
         extra_needs_review=needs_review,
-        notes="bathroom floor tile needs room-specific review" if needs_review else None,
+        notes="; ".join(flooring_review_notes) if flooring_review_notes else None,
         **context,
     )
 
@@ -722,11 +1085,34 @@ def extract_hallway_fact(block: str, **context: Any) -> ExtractedFact | None:
 
 def extract_living_room_fact(block: str, **context: Any) -> ExtractedFact | None:
     lowered = normalize_for_match(block)
-    if not any(
+    has_living_furniture = any(
         marker in lowered
-        for marker in ["тв тумб", "тв-тумб", "тумба под тв", "телевизор", "гостин", "комод", "стеллаж", "полк", "консол"]
-    ):
+        for marker in ["тв тумб", "тв-тумб", "тумба под тв", "телевизор", "комод", "стеллаж", "полк", "консол", "шкаф", "журнальн"]
+    )
+    if not has_living_furniture:
+        if "гостин" in lowered and has_lighting_or_decor(block):
+            return make_product_fact(
+                block,
+                category="living_room_furniture",
+                item_type="living_room_context_match",
+                extraction_method="regex:living_room_context_review",
+                confidence_hint="medium",
+                extra_needs_review=True,
+                notes="lighting/decor line mentions living room only as context",
+                **context,
+            )
         return None
+    if has_lighting_or_decor(block) and not any(marker in lowered for marker in ["полк", "стеллаж", "комод", "тумб", "шкаф", "консол"]):
+        return make_product_fact(
+            block,
+            category="living_room_furniture",
+            item_type="living_room_context_match",
+            extraction_method="regex:living_room_decor_review",
+            confidence_hint="medium",
+            extra_needs_review=True,
+            notes="lighting/decor line is not a clean living-room furniture fact",
+            **context,
+        )
     item_type = "cabinet"
     if any(marker in lowered for marker in ["тв тумб", "тв-тумб", "тумба под тв", "телевизор"]):
         item_type = "tv_unit"
@@ -738,9 +1124,13 @@ def extract_living_room_fact(block: str, **context: Any) -> ExtractedFact | None
         item_type = "shelves"
     elif "консол" in lowered:
         item_type = "console"
+    elif "шкаф" in lowered:
+        item_type = "cabinet"
+    elif "журнальн" in lowered:
+        item_type = "coffee_table"
     descriptor = descriptor_after_keywords(
         block,
-        ["тв тумба", "тв-тумба", "тумба под тв", "комод", "стеллаж", "полки", "полка", "консоль"],
+        ["тв тумба", "тв-тумба", "тумба под тв", "шкаф", "комод", "стеллаж", "полки", "полка", "консоль", "журнальный столик"],
     )
     return make_product_fact(
         block,
@@ -793,6 +1183,9 @@ def make_product_fact(
             vendor_raw = article.vendor_raw
             vendor_normalized = article.vendor_normalized
     evidence_quote = build_evidence_quote(block)
+    detected_room_contexts = detect_room_contexts(block)
+    if room_context is None:
+        room_context = first_non_target_room_context(block)
 
     detail_count = sum(
         bool(value)
@@ -814,6 +1207,8 @@ def make_product_fact(
         confidence = "medium"
     if not (vendor_normalized or article_id or price):
         confidence = "low" if confidence_hint != "high" else "medium"
+    if extra_needs_review and confidence_hint == "medium":
+        confidence = "medium"
 
     review_notes: list[str] = []
     if notes:
@@ -822,10 +1217,28 @@ def make_product_fact(
         review_notes.append("low confidence deterministic match")
     if not (vendor_normalized or article_id or price):
         review_notes.append("no vendor, article id, or price parsed")
+    if len(list(PRICE_RE.finditer(block))) > 1:
+        review_notes.append("multiple prices in quote; price attribution ambiguous")
     if suspiciously_long_descriptor(item_name) or suspiciously_long_descriptor(model):
         review_notes.append("suspiciously long descriptor")
+    if any(
+        descriptor_has_suspicious_prefix(value)
+        for value in [item_name, model, material, finish, color]
+    ):
+        review_notes.append("suspicious descriptor fragment")
+    non_target_contexts = [
+        detected_context
+        for detected_context in detected_room_contexts
+        if detected_context in NON_TARGET_REVIEW_CONTEXTS
+    ]
+    if category in NON_TARGET_REVIEW_CATEGORIES and non_target_contexts:
+        review_notes.append("non-target room context: " + ", ".join(non_target_contexts))
+        if room_context is None:
+            room_context = non_target_contexts[0]
     if count_item_triggers(evidence_quote) > 2:
         review_notes.append("quote may contain several unrelated items")
+    if confidence == "high" and (extra_needs_review or review_notes):
+        confidence = "medium"
 
     needs_review = extra_needs_review or bool(review_notes) or confidence == "low"
     return make_fact(
@@ -930,24 +1343,70 @@ def make_fact(
 
 
 def descriptor_after_keywords(block: str, keywords: list[str]) -> str | None:
-    cleaned = remove_price_and_article(without_promos(block))
+    cleaned = remove_parse_noise_preserve_lines(strip_promo_lines(block))
     vendor = find_vendor(cleaned)
     if vendor:
         cleaned = re.sub(re.escape(vendor.raw), " ", cleaned, flags=re.IGNORECASE)
-    lowered = normalize_for_match(cleaned)
-    best_index: int | None = None
-    best_keyword = ""
+    best_match: re.Match[str] | None = None
     for keyword in keywords:
-        index = lowered.find(normalize_for_match(keyword))
-        if index >= 0 and (best_index is None or index < best_index):
-            best_index = index
-            best_keyword = keyword
-    if best_index is not None:
-        cleaned = cleaned[best_index + len(best_keyword) :]
+        pattern = keyword_boundary_re(keyword)
+        match = pattern.search(cleaned)
+        if match and (best_match is None or match.start() < best_match.start()):
+            best_match = match
+    if best_match is not None:
+        cleaned = cleaned[best_match.end() :]
+    cleaned = descriptor_same_item_segment(cleaned)
     cleaned = re.sub(r"^\s*\d+[.)]\s*", "", cleaned)
-    cleaned = re.sub(r"(?i)\b(ozon|wb|вб|ям)\b", " ", cleaned)
+    cleaned = re.sub(rf"(?i)(?<![{WORD_CHARS}])(ozon|wb|вб|ям)(?![{WORD_CHARS}])", " ", cleaned)
     cleaned = compact_whitespace(cleaned.strip(" -:;,.+"))
+    if descriptor_has_suspicious_prefix(cleaned):
+        return None
     return cleaned or None
+
+
+def strip_promo_lines(text: str) -> str:
+    return "\n".join(
+        line
+        for line in text.splitlines()
+        if not re.search(r"(?i)\bпромо(?:код)?\b|mirzabaeva", line)
+    )
+
+
+def remove_parse_noise_preserve_lines(text: str) -> str:
+    cleaned = PRICE_RE.sub(" ", text)
+    cleaned = ARTICLE_RE.sub(" ", cleaned)
+    cleaned = PROMO_RE.sub(" ", cleaned)
+    return "\n".join(compact_whitespace(line) for line in cleaned.splitlines())
+
+
+def keyword_boundary_re(keyword: str) -> re.Pattern[str]:
+    pieces = [re.escape(piece) for piece in compact_whitespace(keyword).split()]
+    pattern = r"\s+".join(pieces)
+    pattern = pattern.replace(r"\-", r"[-\s]?")
+    return re.compile(rf"(?i)(?<![{WORD_CHARS}]){pattern}(?![{WORD_CHARS}])")
+
+
+def descriptor_same_item_segment(value: str) -> str:
+    lines = [line.strip(" -:;,.+") for line in value.splitlines()]
+    lines = [line for line in lines if line]
+    if not lines:
+        return ""
+    first_line = lines[0]
+    if compact_whitespace(first_line):
+        return first_line
+    for line in lines[1:]:
+        if ITEM_BOUNDARY_RE.search(line):
+            break
+        if compact_whitespace(line):
+            return line
+    return ""
+
+
+def descriptor_has_suspicious_prefix(value: str | None) -> bool:
+    if not value:
+        return False
+    lowered = normalize_for_match(value).strip()
+    return any(lowered.startswith(prefix) for prefix in SUSPICIOUS_DESCRIPTOR_PREFIXES)
 
 
 def split_model_material_color(descriptor: str | None) -> tuple[str | None, str | None, str | None]:
@@ -1233,42 +1692,46 @@ def write_markdown_outputs(result: FactExtractionResult, out_dir: Path) -> list[
     summary_path.write_text(build_summary_markdown(result), encoding="utf-8")
     output_files.append(summary_path)
 
-    by_category = out_dir / "by_category"
-    by_category.mkdir(parents=True, exist_ok=True)
+    quality_path = out_dir / "extraction_quality_summary.md"
+    quality_path.write_text(build_quality_summary_markdown(result), encoding="utf-8")
+    output_files.append(quality_path)
+
     descriptions = {category.category_id: category.description for category in load_category_configs()}
-    for category in STRICT_CATEGORIES:
-        path = by_category / f"{category}.md"
-        path.write_text(
-            build_category_markdown(
-                category,
-                [fact for fact in result.facts if fact.category == category],
-                descriptions.get(category, ""),
-            ),
-            encoding="utf-8",
-        )
-        output_files.append(path)
-    review_path = by_category / "needs_review.md"
-    review_path.write_text(
-        build_category_markdown(
-            "needs_review",
-            [fact for fact in result.facts if fact.needs_review],
-            "Facts retained with needs_review = true.",
-        ),
-        encoding="utf-8",
-    )
-    output_files.append(review_path)
+    category_sets = [
+        ("by_category", result.facts, "all retained facts"),
+        ("by_category_clean", [fact for fact in result.facts if not fact.needs_review], "clean facts only"),
+        ("by_category_needs_review", [fact for fact in result.facts if fact.needs_review], "needs_review facts only"),
+    ]
+    for dirname, facts, suffix in category_sets:
+        by_category = out_dir / dirname
+        by_category.mkdir(parents=True, exist_ok=True)
+        for category in STRICT_CATEGORIES:
+            path = by_category / f"{category}.md"
+            path.write_text(
+                build_category_markdown(
+                    category,
+                    [fact for fact in facts if fact.category == category],
+                    f"{descriptions.get(category, '')} ({suffix})." if descriptions.get(category, "") else suffix,
+                ),
+                encoding="utf-8",
+            )
+            output_files.append(path)
     return output_files
 
 
 def build_summary_markdown(result: FactExtractionResult) -> str:
     facts = result.facts
+    clean_facts = [fact for fact in facts if not fact.needs_review]
+    review_facts = [fact for fact in facts if fact.needs_review]
     category_counts = Counter(fact.category for fact in facts)
+    clean_category_counts = Counter(fact.category for fact in clean_facts)
+    review_category_counts = Counter(fact.category for fact in review_facts)
     confidence_counts = Counter(fact.confidence for fact in facts)
-    vendor_counts = Counter(fact.vendor_normalized for fact in facts if fact.vendor_normalized)
+    vendor_counts = Counter(fact.vendor_normalized for fact in clean_facts if fact.vendor_normalized)
     item_counts = Counter(fact.item_type for fact in facts)
-    color_counts = Counter(fact.color_code for fact in facts if fact.color_code)
+    color_counts = Counter(fact.color_code for fact in clean_facts if fact.color_code)
     kitchen_facades = Counter(
-        fact.finish for fact in facts if fact.category == "kitchens" and fact.finish
+        fact.finish for fact in clean_facts if fact.category == "kitchens" and fact.finish
     )
     sofa_values = Counter(
         value
@@ -1288,7 +1751,8 @@ def build_summary_markdown(result: FactExtractionResult) -> str:
     lines.append(f"- Total posts with real photos in DB: {result.total_posts_with_photos}")
     lines.append(f"- Total source posts processed: {result.source_posts_processed}")
     lines.append(f"- Total facts extracted: {len(facts)}")
-    lines.append(f"- Needs review: {sum(1 for fact in facts if fact.needs_review)}")
+    lines.append(f"- Clean facts: {len(clean_facts)}")
+    lines.append(f"- Needs review: {len(review_facts)}")
     lines.append("")
     lines.append(
         "This is a deterministic evidence table, not a father-facing renovation cheat sheet. "
@@ -1297,10 +1761,13 @@ def build_summary_markdown(result: FactExtractionResult) -> str:
     lines.append("")
     lines.append("## Facts by Category")
     lines.append("")
-    lines.append("| Category | Facts |")
-    lines.append("|---|---:|")
+    lines.append("| Category | All facts | Clean facts | Needs review |")
+    lines.append("|---|---:|---:|---:|")
     for category in STRICT_CATEGORIES:
-        lines.append(f"| `{category}` | {category_counts[category]} |")
+        lines.append(
+            f"| `{category}` | {category_counts[category]} | "
+            f"{clean_category_counts[category]} | {review_category_counts[category]} |"
+        )
     lines.append("")
     lines.append("## Confidence")
     lines.append("")
@@ -1309,18 +1776,102 @@ def build_summary_markdown(result: FactExtractionResult) -> str:
     for confidence in ["high", "medium", "low"]:
         lines.append(f"| `{confidence}` | {confidence_counts[confidence]} |")
     lines.append("")
-    lines.append(f"## Top Normalized Vendors\n\n{format_counter(vendor_counts)}")
+    lines.append(f"## Top Normalized Vendors From Clean Rows\n\n{format_counter(vendor_counts)}")
     lines.append(f"## Top Item Types\n\n{format_counter(item_counts)}")
-    lines.append(f"## Top Wall Color Codes\n\n{format_counter(color_counts)}")
-    lines.append(f"## Top Kitchen Facade Phrases\n\n{format_counter(kitchen_facades)}")
+    lines.append(f"## Top Wall Color Codes From Clean Rows\n\n{format_counter(color_counts)}")
+    lines.append(f"## Top Kitchen Facade Phrases From Clean Rows\n\n{format_counter(kitchen_facades)}")
     lines.append(f"## Top Sofa Fabrics / Colors\n\n{format_counter(sofa_values)}")
     lines.append("## Limitations")
     lines.append("")
     lines.append("- The parser is deterministic and conservative; unclear fields are left empty.")
-    lines.append("- Needs-review rows flag ambiguous room context, sparse details, or broad matches.")
+    lines.append("- Needs-review rows are retained in all-row outputs and split into review-specific files.")
+    lines.append("- Bundle purchases keep the shared price only on a `bundle_purchase` review row.")
     lines.append("- Generated facts are draft evidence rows for later validation, not recommendations.")
     lines.append("")
     return "\n".join(lines)
+
+
+def build_quality_summary_markdown(result: FactExtractionResult) -> str:
+    facts = result.facts
+    clean_facts = [fact for fact in facts if not fact.needs_review]
+    review_facts = [fact for fact in facts if fact.needs_review]
+    note_counts = Counter()
+    for fact in review_facts:
+        notes = normalize_for_match(fact.notes or "")
+        if "bundle purchase" in notes:
+            note_counts["bundle_purchase"] += 1
+        if "suspicious descriptor" in notes:
+            note_counts["suspicious_descriptor"] += 1
+        if "non-target room context" in notes:
+            note_counts["non_target_room"] += 1
+        if "lighting/decor" in notes or "context" in notes:
+            note_counts["context_or_false_positive"] += 1
+        if "several unrelated items" in notes:
+            note_counts["multiple_items"] += 1
+
+    lines: list[str] = []
+    lines.append("# Extraction Quality Summary")
+    lines.append("")
+    lines.append(f"- Total facts: {len(facts)}")
+    lines.append(f"- Clean facts: {len(clean_facts)}")
+    lines.append(f"- Needs review facts: {len(review_facts)}")
+    lines.append("")
+    lines.append("## Review Signals")
+    lines.append("")
+    lines.append("| Signal | Count |")
+    lines.append("|---|---:|")
+    for signal in [
+        "bundle_purchase",
+        "suspicious_descriptor",
+        "non_target_room",
+        "context_or_false_positive",
+        "multiple_items",
+    ]:
+        lines.append(f"| `{signal}` | {note_counts[signal]} |")
+    lines.append("")
+    lines.append("## Review Examples")
+    lines.append("")
+    lines.extend(format_fact_examples(review_facts, limit=12))
+    lines.append("## Clean Examples")
+    lines.append("")
+    lines.extend(format_fact_examples(clean_facts, limit=12))
+    lines.append("## Category Readiness")
+    lines.append("")
+    lines.append("| Category | Stage 2.1 status |")
+    lines.append("|---|---|")
+    readiness = {
+        "wall_colors": "ready-ish for deterministic summary",
+        "kitchens": "usable for facade/countertop/backsplash rows; broad purchases need review",
+        "chairs": "usable after bundle filtering",
+        "tables": "clean rows usable; context and lighting rows reviewed",
+        "sofas": "clean rows usable; context and bundle rows reviewed",
+        "hallway": "needs review for multi-room and grouped purchases",
+        "living_room_furniture": "not ready for final summary; review bucket is important",
+        "flooring": "not ready for final summary; useful rows retained conservatively",
+    }
+    for category in STRICT_CATEGORIES:
+        lines.append(f"| `{category}` | {readiness[category]} |")
+    lines.append("")
+    lines.append("False-positive prevention is deterministic. Clear lighting/decor/context rows are either skipped or retained only as needs-review evidence rows.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_fact_examples(facts: list[ExtractedFact], *, limit: int) -> list[str]:
+    if not facts:
+        return ["No examples.", ""]
+    lines = ["| Category | Item type | Review | Notes | Evidence |", "|---|---|---:|---|---|"]
+    for fact in sort_facts(facts)[:limit]:
+        lines.append(
+            "| "
+            f"`{fact.category}` | "
+            f"`{fact.item_type}` | "
+            f"{int(fact.needs_review)} | "
+            f"{escape_markdown_cell(fact.notes or '')} | "
+            f"{escape_markdown_cell(fact.evidence_quote)} |"
+        )
+    lines.append("")
+    return lines
 
 
 def build_category_markdown(category: str, facts: list[ExtractedFact], description: str) -> str:

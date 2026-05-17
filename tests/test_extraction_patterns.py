@@ -22,6 +22,19 @@ def facts_by_category(text: str, category: str):
     ]
 
 
+def facts_from_text(text: str):
+    return extract_facts_from_text(
+        text=text,
+        source_message_id=7299,
+        date="2026-05-02T11:19:01",
+        source_scope="project_articles",
+    )
+
+
+def clean_facts_by_category(text: str, category: str):
+    return [fact for fact in facts_by_category(text, category) if not fact.needs_review]
+
+
 @pytest.mark.parametrize(
     ("raw", "value", "unit"),
     [
@@ -188,3 +201,135 @@ def test_living_room_tv_unit_extraction() -> None:
     assert facts[0].item_type == "tv_unit"
     assert facts[0].vendor_normalized == "OZON"
     assert facts[0].article_id == "1639148968"
+
+
+def test_bundle_purchase_does_not_emit_clean_item_prices() -> None:
+    facts = facts_from_text("🌱Диваны, стулья, столик, тумба Divan.ru 242 440₽")
+
+    assert any(fact.item_type == "bundle_purchase" and fact.needs_review for fact in facts)
+    assert not [
+        fact
+        for fact in facts
+        if not fact.needs_review
+        and fact.category in {"sofas", "chairs", "tables", "living_room_furniture"}
+        and fact.price_value == 242440
+    ]
+
+
+def test_sofa_table_bundle_keeps_shared_price_in_review_only() -> None:
+    facts = facts_from_text("Диван, журнальный столик, тумба от divan.ru - 80.996₽")
+
+    assert any(fact.item_type == "bundle_purchase" and fact.needs_review for fact in facts)
+    assert not [
+        fact
+        for fact in facts
+        if fact.category == "sofas" and not fact.needs_review and fact.price_value == 80996
+    ]
+
+
+def test_kitchen_hallway_bathroom_bundle_is_review_only() -> None:
+    facts = facts_from_text("🌱Кухня, шкафы в прихожей, шкаф в ванной Mebel.in 560 000₽")
+
+    assert any(fact.item_type == "bundle_purchase" and fact.needs_review for fact in facts)
+    assert not [
+        fact
+        for fact in facts
+        if fact.category in {"kitchens", "hallway"} and not fact.needs_review and fact.price_value == 560000
+    ]
+
+
+def test_sofa_bed_table_hanger_bundle_is_review_only() -> None:
+    facts = facts_from_text("Диван, кровать, прикроватные тумбочки, журнальный столик, вешалка divan.ru - 109.475 ₽")
+
+    assert any(fact.item_type == "bundle_purchase" and fact.needs_review for fact in facts)
+    assert not [
+        fact
+        for fact in facts
+        if fact.category == "sofas" and not fact.needs_review and fact.price_value == 109475
+    ]
+
+
+def test_descriptor_cleanup_plural_chairs_does_not_leave_suffix_fragment() -> None:
+    facts = facts_by_category("Стулья OZON Арт. 1851786582 10 964₽/шт.", "chairs")
+
+    assert len(facts) == 1
+    values = [facts[0].item_name, facts[0].model]
+    assert "ья" not in values
+
+
+def test_descriptor_cleanup_coffee_table_model() -> None:
+    facts = facts_by_category("Журнальный столик Divan.ru Лимм Древесный 14 990₽", "tables")
+
+    assert len(facts) == 1
+    assert facts[0].item_type == "coffee_table"
+    assert facts[0].model == "Лимм Древесный"
+    assert not facts[0].model.startswith("ик")
+
+
+def test_descriptor_cleanup_sofa_model() -> None:
+    facts = facts_by_category("Диван Divan.ru Спейс-1 Коралловый 85 491₽", "sofas")
+
+    assert len(facts) == 1
+    assert facts[0].model is not None
+    assert facts[0].model.startswith("Спейс-1")
+    assert not facts[0].model.startswith("ом")
+
+
+def test_sofa_context_lighting_is_not_clean_sofa() -> None:
+    assert clean_facts_by_category("Бра над диваном OZON Арт. 958601723 3087₽", "sofas") == []
+
+
+def test_bed_with_sofa_context_is_not_clean_sofa() -> None:
+    assert clean_facts_by_category("Кровать трансформер с диваном Guter mebel 120 100₽", "sofas") == []
+
+
+def test_table_lighting_context_is_not_clean_table() -> None:
+    assert clean_facts_by_category("Настольная лампа OZON Арт. 2796002119 1198₽", "tables") == []
+    assert clean_facts_by_category("люстра над столом Алиэкспресс 34 459₽", "tables") == []
+
+
+def test_living_room_lighting_is_not_clean_furniture() -> None:
+    assert clean_facts_by_category("Люстра в гостиной OZON Арт. 2902627596 15 812₽", "living_room_furniture") == []
+
+
+def test_bathroom_shelves_are_needs_review_room_context() -> None:
+    facts = facts_by_category("Полки в ванной OZON Арт. 1016863987 1290₽", "living_room_furniture")
+
+    assert len(facts) == 1
+    assert facts[0].needs_review
+    assert facts[0].room_context == "bathroom"
+
+
+def test_flooring_quartz_vinyl_descriptor_stays_on_same_item() -> None:
+    facts = facts_by_category("Кварцвинил + подложка Alpine floor 68.000 руб.\nПотолки 7 небо", "flooring")
+
+    assert len(facts) == 1
+    assert facts[0].material is not None
+    assert "Alpine floor" in facts[0].material
+    assert "Потолки" not in facts[0].material
+
+
+def test_flooring_bedroom_context_with_ambiguous_price_needs_review() -> None:
+    facts = facts_by_category(
+        "Телевизор, стиральная машина и кондиционер на 100.000₽. Также заменили ламинат в спальне.",
+        "flooring",
+    )
+
+    assert len(facts) == 1
+    assert facts[0].needs_review
+    assert facts[0].room_context == "bedroom"
+
+
+def test_kitchen_accessory_is_review_or_skipped_not_clean() -> None:
+    assert clean_facts_by_category("Ручки на кухне OZON Арт. 1925710161 834₽/шт.", "kitchens") == []
+
+
+def test_kitchen_facade_clean_finish_value() -> None:
+    facts = facts_by_category("Кухня фасады Дуб каселла+Капучино Mebel.in 210 000₽", "kitchens")
+
+    assert len(facts) == 1
+    assert facts[0].item_type == "kitchen_facades"
+    assert "Дуб каселла+Капучино" in (facts[0].finish or "")
+    assert facts[0].vendor_normalized == "Mebel.in"
+    assert facts[0].confidence == "high"
+    assert not facts[0].needs_review

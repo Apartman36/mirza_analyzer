@@ -112,19 +112,33 @@ python -m mirza_analyzer extract-facts --db outputs/mirza.sqlite --out-dir outpu
 Useful options:
 
 ```powershell
-python -m mirza_analyzer extract-facts --db outputs/mirza.sqlite --out-dir outputs/extracted --source candidates --include-needs-review
 python -m mirza_analyzer extract-facts --db outputs/mirza.sqlite --out-dir outputs/extracted --source all_text --limit 100 --format all
 ```
+
+`--include-needs-review` is kept only as a deprecated compatibility flag. Stage 2.1 always writes all retained rows and always writes clean/review split files.
+
+## Stage 2.1: extraction QA review buckets
+
+Stage 2.1 repairs deterministic extraction quality issues found during QA. The goal is honesty, not maximum row count: clean rows should be safe deterministic evidence, suspicious rows should stay visible as `needs_review`, and grouped purchase lines should not copy a shared bundle price onto several single-item facts.
+
+This stage is still deterministic. It does not use LLM validation, LM Studio, OpenRouter, OCR, VLM, comments sync, dashboards, PDFs, or father-facing final reports.
+
+`bundle_purchase` rows are review rows for lines such as `Диван, журнальный столик, тумба Divan.ru 80 996₽`. The shared price is kept on the `bundle_purchase` evidence row and is not emitted as clean sofa/table/cabinet prices.
 
 Generated outputs:
 
 ```text
 outputs/extracted/
-  extracted_facts.csv
+  extracted_facts_all.csv
+  extracted_facts_clean.csv
+  extracted_facts_needs_review.csv
   extracted_facts.jsonl
   extracted_facts.sqlite
   summary.md
+  extraction_quality_summary.md
   by_category/
+  by_category_clean/
+  by_category_needs_review/
     flooring.md
     wall_colors.md
     kitchens.md
@@ -133,10 +147,11 @@ outputs/extracted/
     sofas.md
     hallway.md
     living_room_furniture.md
-    needs_review.md
 ```
 
-This stage still does not use LLMs, OCR, VLMs, LM Studio, OpenRouter, internet search, or comments sync. The extracted facts are draft evidence rows with source message ids and evidence quotes; they are not father-facing renovation recommendations.
+`summary.md` reports total, clean, and `needs_review` facts, plus category splits and top values from clean rows. `extraction_quality_summary.md` reports review signals such as bundles, suspicious descriptors, non-target room contexts, and context/false-positive rows.
+
+The extracted facts are draft evidence rows with source message ids and evidence quotes; they are not father-facing renovation recommendations.
 
 Ожидаемые результаты:
 
