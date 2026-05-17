@@ -162,6 +162,123 @@ outputs/
   sample_posts.md
 ```
 
+## Stage 2.5: LLM-assisted validation and normalization
+
+Stage 2.5 adds an optional reviewer/normalizer layer on top of the deterministic
+extracted facts. The LLM **does not** replace the deterministic parser. The
+deterministic facts in `outputs/extracted/extracted_facts.sqlite` remain the
+source of record. Stage 2.5 writes a separate validation dataset into
+`outputs/llm_review/` and never edits `extracted_facts_clean.csv` or
+`extracted_facts_needs_review.csv`.
+
+What Stage 2.5 does:
+
+- samples deterministic facts (clean / needs_review / mixed / by category);
+- sends each fact plus its evidence quote and the original post excerpt to a
+  local LM Studio model (or to an in-process mock for tests);
+- requires a strict JSON answer (decision, corrections, normalized terms);
+- retries once with a repair prompt if the response is not valid JSON;
+- falls back to `decision=needs_human` if the response is still invalid;
+- writes JSONL, CSV, SQLite, summary, and per-decision / per-category markdowns.
+
+What Stage 2.5 does **not** do: OCR, VLM, comments sync, dashboards, PDFs,
+father-facing final reports, new father-facing categories, OpenRouter integration,
+direct edits to deterministic extraction outputs, automatic overwriting of
+`extracted_facts_clean.csv` or `extracted_facts_needs_review.csv`.
+
+### Starting LM Studio
+
+Open LM Studio, load one of the local models (for example `qwen3.6-27b`,
+`gemma-4-31b`, or `nemotron-3-nano-omni`) and start the OpenAI-compatible
+server. The default base URL is `http://127.0.0.1:1234/v1`.
+
+Verify the server is up:
+
+```powershell
+curl http://127.0.0.1:1234/v1/models
+```
+
+### Example run
+
+```powershell
+python -m mirza_analyzer llm-review `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --out-dir outputs/llm_review `
+  --provider lmstudio `
+  --base-url http://127.0.0.1:1234/v1 `
+  --model qwen3.6-27b `
+  --sample-size 100 `
+  --source mixed
+```
+
+Use `--provider mock` to exercise the pipeline without LM Studio. The mock
+provider is also what the test suite uses, so `python -m pytest` never
+requires a running LM Studio server.
+
+Useful options:
+
+- `--source` — one of `clean`, `needs_review`, `mixed`, `category`.
+- `--category` — when `--source category`, filter to a single category.
+- `--sample-size`, `--seed` — deterministic sampling (default 100, seed 42).
+- `--max-evidence-chars` — bounded source-post excerpt length (default 2500).
+- `--canonical-db outputs/mirza.sqlite` — pull original post text into prompts.
+- `--temperature` — model temperature, defaults to 0.
+- `--timeout-seconds` — per-call HTTP timeout (default 120s).
+- `--dry-run` — print the planned sample, write `planned_rows.csv`, make no model calls.
+- `--resume` — skip rows whose `(input_hash, provider, model)` are already in the SQLite results.
+- `--strict-json` / `--no-strict-json` — require a top-level JSON object; without
+  strict mode, the first `{...}` block in the response is salvaged.
+
+### Optional manual smoke test
+
+When LM Studio is running, you can run a small smoke test that is **not** part
+of `pytest`:
+
+```powershell
+python -m mirza_analyzer llm-review `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --out-dir outputs/llm_review_smoke `
+  --provider lmstudio `
+  --base-url http://127.0.0.1:1234/v1 `
+  --model qwen3.6-27b `
+  --sample-size 5 `
+  --source needs_review
+```
+
+If the server is unavailable, the CLI exits with a clear error instead of a
+stack trace.
+
+### Generated outputs
+
+```text
+outputs/llm_review/
+  llm_review_results.jsonl
+  llm_review_results.csv
+  llm_review.sqlite
+  summary.md
+  by_decision/
+    keep.md
+    fix.md
+    discard.md
+    needs_human.md
+  by_category/
+    flooring.md
+    wall_colors.md
+    kitchens.md
+    chairs.md
+    tables.md
+    sofas.md
+    hallway.md
+    living_room_furniture.md
+  prompts/
+    system_prompt.txt
+    user_prompt_template.txt
+```
+
+All `outputs/llm_review/*` and `outputs/llm_review_smoke/*` files are ignored by
+git. Deterministic facts in `outputs/extracted/` are never overwritten by this
+stage.
+
 ## Как проверить SQLite из Python
 
 ```python

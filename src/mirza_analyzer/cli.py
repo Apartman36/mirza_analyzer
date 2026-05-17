@@ -7,13 +7,16 @@ from .audit import write_audit_report
 from .candidate_mining import write_candidate_outputs
 from .db import create_database_from_data_root, database_stats
 from .extraction import extract_facts
+from .llm_providers import LLMProviderError
+from .llm_review import run_llm_review
 from .sample import write_sample_posts
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    args.func(args)
+    result = args.func(args)
+    return int(result) if isinstance(result, int) else 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -84,6 +87,55 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
     )
     extract_parser.set_defaults(func=run_extract_facts)
+
+    llm_review_parser = subparsers.add_parser(
+        "llm-review",
+        help="Stage 2.5: review deterministic facts with an LLM (LM Studio or mock).",
+    )
+    llm_review_parser.add_argument("--facts-db", required=True, type=Path)
+    llm_review_parser.add_argument("--out-dir", required=True, type=Path)
+    llm_review_parser.add_argument(
+        "--provider",
+        choices=["mock", "lmstudio"],
+        default="lmstudio",
+    )
+    llm_review_parser.add_argument(
+        "--base-url",
+        default="http://127.0.0.1:1234/v1",
+    )
+    llm_review_parser.add_argument("--model", default="local-model")
+    llm_review_parser.add_argument(
+        "--source",
+        choices=["clean", "needs_review", "mixed", "category"],
+        default="mixed",
+    )
+    llm_review_parser.add_argument("--category", default=None)
+    llm_review_parser.add_argument("--sample-size", type=int, default=100)
+    llm_review_parser.add_argument("--seed", type=int, default=42)
+    llm_review_parser.add_argument("--max-evidence-chars", type=int, default=2500)
+    llm_review_parser.add_argument("--temperature", type=float, default=0.0)
+    llm_review_parser.add_argument("--dry-run", action="store_true")
+    llm_review_parser.add_argument("--limit", type=int, default=None)
+    llm_review_parser.add_argument("--resume", action="store_true")
+    llm_review_parser.add_argument("--timeout-seconds", type=float, default=120.0)
+    llm_review_parser.add_argument(
+        "--strict-json",
+        dest="strict_json",
+        action="store_true",
+        default=True,
+    )
+    llm_review_parser.add_argument(
+        "--no-strict-json",
+        dest="strict_json",
+        action="store_false",
+    )
+    llm_review_parser.add_argument(
+        "--canonical-db",
+        type=Path,
+        default=None,
+        help="Optional canonical SQLite (outputs/mirza.sqlite) for source post excerpts.",
+    )
+    llm_review_parser.set_defaults(func=run_llm_review_command)
 
     return parser
 
@@ -170,3 +222,56 @@ def run_extract_facts(args: argparse.Namespace) -> None:
     ]:
         count = sum(1 for fact in result.facts if fact.category == category_id)
         print(f"  {category_id}: {count}")
+
+
+def run_llm_review_command(args: argparse.Namespace) -> int:
+    try:
+        result = run_llm_review(
+            facts_db=args.facts_db,
+            out_dir=args.out_dir,
+            provider=args.provider,
+            base_url=args.base_url,
+            model=args.model or "local-model",
+            source=args.source,
+            category=args.category,
+            sample_size=args.sample_size,
+            seed=args.seed,
+            max_evidence_chars=args.max_evidence_chars,
+            temperature=args.temperature,
+            dry_run=args.dry_run,
+            limit=args.limit,
+            resume=args.resume,
+            timeout_seconds=args.timeout_seconds,
+            strict_json=args.strict_json,
+            canonical_db=args.canonical_db,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}")
+        return 2
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 2
+    except LLMProviderError as exc:
+        print(
+            "error: could not reach LLM provider — "
+            f"{exc}. Start LM Studio at the configured --base-url or pass --provider mock."
+        )
+        return 3
+
+    if result.dry_run:
+        print(f"[dry-run] planned rows: {len(result.planned_rows)}")
+        for fact in result.planned_rows[:10]:
+            print(
+                f"  fact_id={fact.fact_id} category={fact.category} "
+                f"item_type={fact.item_type} needs_review={int(fact.needs_review)}"
+            )
+        if len(result.planned_rows) > 10:
+            print(f"  ... and {len(result.planned_rows) - 10} more")
+        print(f"[dry-run] no model calls made; wrote planned_rows.csv into {args.out_dir.resolve()}")
+        return 0
+
+    print(f"Wrote LLM review outputs: {args.out_dir.resolve()}")
+    print(f"Provider: {result.provider} | Model: {result.model}")
+    print(f"Reviewed: {len(result.records)} | Skipped (resume): {len(result.skipped)}")
+    print(f"Invalid/error: {result.invalid_count} | Retries: {result.retry_count}")
+    return 0

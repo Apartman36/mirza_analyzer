@@ -23,3 +23,8 @@ outputs/candidates/*
 !outputs/candidates/.gitkeep
 outputs/extracted/*
 !outputs/extracted/.gitkeep
+outputs/llm_review/*
+!outputs/llm_review/.gitkeep
+outputs/llm_review_smoke/*
+!outputs/llm_review_smoke/.gitkeep
+.claude/
