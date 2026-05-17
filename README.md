@@ -69,6 +69,36 @@ python -m mirza_analyzer stats --db outputs/mirza.sqlite
 python -m mirza_analyzer sample --db outputs/mirza.sqlite --out outputs/sample_posts.md --limit 50
 ```
 
+## Stage 1.5: category candidate mining
+
+Слой Stage 1.5 добавляет детерминированный поиск кандидатов по категориям из исходных требований: полы, цвета стен, кухни, стулья, столы, диваны, прихожая и мебель для гостиной.
+
+Команда читает `canonical_messages` и реальные фотографии из `media`, где `media_kind = 'photo'`, сопоставляет текст с UTF-8 конфигурацией категорий и сохраняет доказательства для ручной проверки:
+
+```powershell
+python -m mirza_analyzer candidates --db outputs/mirza.sqlite --out-dir outputs/candidates --limit-per-category 100
+```
+
+Выходные файлы:
+
+```text
+outputs/candidates/
+  summary.md
+  candidates.csv
+  candidates.jsonl
+  flooring.md
+  wall_colors.md
+  kitchens.md
+  chairs.md
+  tables.md
+  sofas.md
+  hallway.md
+  living_room_furniture.md
+  project_article_posts.md
+```
+
+Этот слой не использует LLM, OCR, VLM или OpenRouter. Он не делает финальные дизайн-выводы, не утверждает «самое частое» как итоговый факт и не формирует рекомендации по ремонту. Результаты нужны только для ручного просмотра и для решения, где текста достаточно, а где позже понадобятся OCR/VLM/комментарии.
+
 Ожидаемые результаты:
 
 ```text
@@ -102,4 +132,3 @@ for post in conn.execute("""
 ## Следующий этап
 
 После ручной проверки `audit.md`, `stats` и `sample_posts.md` можно добавлять отдельный слой тематической разметки: полы, цвета стен, кухни, фасады, стулья, столы, диваны, прихожие и мебель для гостиной. Этот репозиторий намеренно отделяет надежную загрузку данных от будущей аналитики.
-
