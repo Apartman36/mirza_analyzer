@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .audit import write_audit_report
+from .candidate_mining import write_candidate_outputs
 from .db import create_database_from_data_root, database_stats
 from .sample import write_sample_posts
 
@@ -40,6 +41,23 @@ def build_parser() -> argparse.ArgumentParser:
     stats_parser = subparsers.add_parser("stats", help="Print SQLite ingestion statistics.")
     stats_parser.add_argument("--db", required=True, type=Path)
     stats_parser.set_defaults(func=run_stats)
+
+    candidates_parser = subparsers.add_parser(
+        "candidates",
+        help="Mine deterministic category candidates for manual review.",
+    )
+    candidates_parser.add_argument("--db", required=True, type=Path)
+    candidates_parser.add_argument("--out-dir", required=True, type=Path)
+    candidates_parser.add_argument("--limit-per-category", type=int, default=100)
+    candidates_parser.add_argument("--min-score", type=int, default=2)
+    candidates_parser.add_argument("--include-low-confidence", action="store_true")
+    candidates_parser.add_argument("--photos-per-post", type=int, default=3)
+    candidates_parser.add_argument(
+        "--format",
+        choices=["markdown", "csv", "jsonl", "all"],
+        default="all",
+    )
+    candidates_parser.set_defaults(func=run_candidates)
 
     return parser
 
@@ -81,3 +99,19 @@ def run_stats(args: argparse.Namespace) -> None:
     print(f"Reply-to records: {stats['reply_to_message_id_records']}")
     print(f"Forwarded records: {stats['forwarded_records']}")
 
+
+def run_candidates(args: argparse.Namespace) -> None:
+    result = write_candidate_outputs(
+        args.db,
+        args.out_dir,
+        limit_per_category=args.limit_per_category,
+        min_score=args.min_score,
+        include_low_confidence=args.include_low_confidence,
+        photos_per_post=args.photos_per_post,
+        output_format=args.format,
+    )
+    print(f"Wrote candidate outputs: {args.out_dir.resolve()}")
+    print(f"Candidate rows: {len(result.candidates)}")
+    print(f"Project/article posts: {len(result.project_article_posts)}")
+    for category_id, candidates in result.candidates_by_category.items():
+        print(f"  {category_id}: {len(candidates)}")
