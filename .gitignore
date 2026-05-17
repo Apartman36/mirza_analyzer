@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+*.egg-info/
+src/*.egg-info/
+
+outputs/*.sqlite
+outputs/*.sqlite-wal
+outputs/*.sqlite-shm
+outputs/audit.md
+outputs/sample_posts.md
+outputs/category_scan_v2.md
+outputs/category_candidates_preview.md
+outputs/candidates/*
+!outputs/candidates/.gitkeep
+
