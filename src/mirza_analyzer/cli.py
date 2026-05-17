@@ -6,6 +6,7 @@ from pathlib import Path
 from .audit import write_audit_report
 from .candidate_mining import write_candidate_outputs
 from .db import create_database_from_data_root, database_stats
+from .extraction import extract_facts
 from .sample import write_sample_posts
 
 
@@ -58,6 +59,27 @@ def build_parser() -> argparse.ArgumentParser:
         default="all",
     )
     candidates_parser.set_defaults(func=run_candidates)
+
+    extract_parser = subparsers.add_parser(
+        "extract-facts",
+        help="Extract deterministic structured facts from canonical Telegram text.",
+    )
+    extract_parser.add_argument("--db", required=True, type=Path)
+    extract_parser.add_argument("--out-dir", required=True, type=Path)
+    extract_parser.add_argument(
+        "--source",
+        choices=["project_articles", "candidates", "all_text"],
+        default="project_articles",
+    )
+    extract_parser.add_argument("--limit", type=int)
+    extract_parser.add_argument("--min-project-article-score", type=int, default=2)
+    extract_parser.add_argument("--include-needs-review", action="store_true")
+    extract_parser.add_argument(
+        "--format",
+        choices=["markdown", "csv", "jsonl", "sqlite", "all"],
+        default="all",
+    )
+    extract_parser.set_defaults(func=run_extract_facts)
 
     return parser
 
@@ -115,3 +137,31 @@ def run_candidates(args: argparse.Namespace) -> None:
     print(f"Project/article posts: {len(result.project_article_posts)}")
     for category_id, candidates in result.candidates_by_category.items():
         print(f"  {category_id}: {len(candidates)}")
+
+
+def run_extract_facts(args: argparse.Namespace) -> None:
+    result = extract_facts(
+        args.db,
+        args.out_dir,
+        source=args.source,
+        limit=args.limit,
+        min_project_article_score=args.min_project_article_score,
+        include_needs_review=args.include_needs_review,
+        output_format=args.format,
+    )
+    print(f"Wrote extracted fact outputs: {args.out_dir.resolve()}")
+    print(f"Source posts processed: {result.source_posts_processed}")
+    print(f"Extracted facts: {len(result.facts)}")
+    print(f"Needs review: {sum(1 for fact in result.facts if fact.needs_review)}")
+    for category_id in [
+        "flooring",
+        "wall_colors",
+        "kitchens",
+        "chairs",
+        "tables",
+        "sofas",
+        "hallway",
+        "living_room_furniture",
+    ]:
+        count = sum(1 for fact in result.facts if fact.category == category_id)
+        print(f"  {category_id}: {count}")

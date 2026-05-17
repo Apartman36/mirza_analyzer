@@ -99,6 +99,45 @@ outputs/candidates/
 
 Этот слой не использует LLM, OCR, VLM или OpenRouter. Он не делает финальные дизайн-выводы, не утверждает «самое частое» как итоговый факт и не формирует рекомендации по ремонту. Результаты нужны только для ручного просмотра и для решения, где текста достаточно, а где позже понадобятся OCR/VLM/комментарии.
 
+## Stage 2: structured fact extraction
+
+Stage 2 adds deterministic text extraction from project/article posts and high-confidence category candidates. It reads `canonical_messages` and `media` directly from SQLite, so it does not require generated `outputs/candidates/*.md` files to exist.
+
+Default project/article extraction:
+
+```powershell
+python -m mirza_analyzer extract-facts --db outputs/mirza.sqlite --out-dir outputs/extracted --source project_articles
+```
+
+Useful options:
+
+```powershell
+python -m mirza_analyzer extract-facts --db outputs/mirza.sqlite --out-dir outputs/extracted --source candidates --include-needs-review
+python -m mirza_analyzer extract-facts --db outputs/mirza.sqlite --out-dir outputs/extracted --source all_text --limit 100 --format all
+```
+
+Generated outputs:
+
+```text
+outputs/extracted/
+  extracted_facts.csv
+  extracted_facts.jsonl
+  extracted_facts.sqlite
+  summary.md
+  by_category/
+    flooring.md
+    wall_colors.md
+    kitchens.md
+    chairs.md
+    tables.md
+    sofas.md
+    hallway.md
+    living_room_furniture.md
+    needs_review.md
+```
+
+This stage still does not use LLMs, OCR, VLMs, LM Studio, OpenRouter, internet search, or comments sync. The extracted facts are draft evidence rows with source message ids and evidence quotes; they are not father-facing renovation recommendations.
+
 Ожидаемые результаты:
 
 ```text

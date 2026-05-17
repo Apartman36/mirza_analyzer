@@ -5,13 +5,21 @@ __pycache__/
 *.egg-info/
 src/*.egg-info/
 
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite-journal
+
 outputs/*.sqlite
 outputs/*.sqlite-wal
 outputs/*.sqlite-shm
+outputs/*.sqlite-journal
 outputs/audit.md
 outputs/sample_posts.md
 outputs/category_scan_v2.md
 outputs/category_candidates_preview.md
+outputs/*.md
 outputs/candidates/*
 !outputs/candidates/.gitkeep
-
+outputs/extracted/*
+!outputs/extracted/.gitkeep
