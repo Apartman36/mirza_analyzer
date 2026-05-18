@@ -161,6 +161,7 @@ class ReportDataset:
     exclusion_reasons: Counter[str] = field(default_factory=Counter)
     applied_fix_count: int = 0
     price_suppressed_count: int = 0
+    display_values_suppressed: int = 0
 
 
 @dataclass(frozen=True)
@@ -383,8 +384,16 @@ def build_report_dataset(
         else:
             excluded.append(result)
 
+    sorted_facts = sort_effective_facts(effective)
+    display_suppressed = sum(
+        1
+        for fact in sorted_facts
+        if not is_display_value_useful(
+            primary_value(fact), category=fact.category, item_type=fact.item_type
+        )
+    )
     return ReportDataset(
-        facts=sort_effective_facts(effective),
+        facts=sorted_facts,
         excluded=excluded,
         source_fact_count=len(source_facts),
         review_count=len(reviews),
@@ -392,6 +401,7 @@ def build_report_dataset(
         exclusion_reasons=Counter(item.reason for item in excluded),
         applied_fix_count=applied_fix_count,
         price_suppressed_count=price_suppressed_count,
+        display_values_suppressed=display_suppressed,
     )
 
 
@@ -668,6 +678,13 @@ def write_report_outputs(
     )
     output_files.insert(0, report_path)
 
+    short_path = out_dir / "father_report_short.md"
+    short_path.write_text(
+        build_short_report_markdown(dataset, options, generated_at),
+        encoding="utf-8",
+    )
+    output_files.insert(1, short_path)
+
     summary_path = out_dir / "father_report_summary.md"
     summary_path.write_text(
         build_summary_markdown(dataset, options, generated_at),
@@ -737,6 +754,11 @@ def build_how_to_read(facts_db: Path, llm_review_dbs: Sequence[Path]) -> list[st
         "",
         "Основа отчёта — текстовые посты, извлечённые артикулы, цены, магазины, модели, цвета и короткие цитаты-доказательства. "
         "Фотографии в этой версии не анализируются OCR/VLM; если путь к фото уже есть в данных, он указан только как локальная ссылка текстом.",
+        "",
+        "Показываем только проверенные/достаточно чистые факты по извлечённым данным. "
+        "Шумные значения (контексты вроде «в прихожей», голые артикулы, фрагменты эссе) скрыты в таблицах, но остаются в `source_facts_used.csv`.",
+        "",
+        "Короткая версия для отца находится рядом: `father_report_short.md`. Её удобно показать первой.",
         "",
         f"{review_note} Детерминированная база фактов остаётся источником записи: `{facts_db}`.",
         "",
@@ -883,7 +905,7 @@ def build_wall_colors_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    color_counts = count_values(
+    color_counts = count_display_values(
         facts,
         lambda fact: normalize_wall_color_code(fact.color_code or fact.color),
     )
@@ -907,13 +929,16 @@ def build_flooring_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    type_counts = count_values(facts, lambda fact: readable_item_type(fact.item_type))
-    material_counts = count_values(
+    type_counts = count_values(facts, lambda fact: display_item_type_ru(fact.item_type))
+    material_counts = count_display_values(
         facts,
-        lambda fact: normalize_flooring_material(fact.material or fact.brand or fact.finish or fact.evidence_quote),
+        lambda fact: normalize_flooring_material(fact.material or fact.brand or fact.finish or ""),
     )
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.brand)
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.brand)
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
+    if len(facts) < 8:
+        lines.append("Заметка: выборка по полу небольшая, поэтому это пока ориентир, а не итог.")
+        lines.append("")
     lines.extend(subsection_counter("Типы покрытия", "Тип", type_counts, options.max_top_values))
     lines.extend(subsection_counter("Материалы / бренды / коллекции", "Значение", material_counts, options.max_top_values))
     lines.extend(subsection_counter("Поставщики / магазины", "Поставщик", vendor_counts, options.max_top_values))
@@ -928,28 +953,66 @@ def build_kitchens_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
-    finish_counts = count_values(
-        [fact for fact in facts if fact.finish or "фасад" in fact.item_type.lower()],
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    finish_facts = [
+        fact for fact in facts if fact.finish or "фасад" in (fact.item_type or "").lower()
+    ]
+    finish_counts = count_display_values(
+        finish_facts,
         lambda fact: normalize_kitchen_finish(fact.finish or fact.model or fact.color),
     )
     countertop_backsplash = [
-        fact for fact in facts if any(token in fact.item_type.lower() for token in ("countertop", "backsplash", "fartuk", "tile"))
+        fact
+        for fact in facts
+        if any(
+            token in (fact.item_type or "").lower()
+            for token in ("countertop", "backsplash", "fartuk", "tile")
+        )
     ]
-    article_counts = count_values(facts, lambda fact: fact.marketplace or fact.vendor if fact.article_id else None)
+    backsplash_vendor_counts = count_display_values(
+        countertop_backsplash, lambda fact: fact.vendor or fact.marketplace
+    )
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
     lines.extend(subsection_counter("Производители / где заказывает", "Поставщик", vendor_counts, options.max_top_values))
     lines.extend(subsection_counter("Фасады", "Фраза фасадов / отделки", finish_counts, options.max_top_values))
-    lines.extend(subsection_counter("Столешницы / фартуки / артикулы", "Площадка", article_counts, options.max_top_values))
+    lines.extend(
+        subsection_counter(
+            "Столешницы / фартуки — где встречается",
+            "Площадка",
+            backsplash_vendor_counts,
+            options.max_top_values,
+        )
+    )
     if countertop_backsplash:
-        lines.extend(example_table(countertop_backsplash, limit=min(6, options.max_examples_per_section), include_value=True))
+        lines.extend(
+            example_table(
+                countertop_backsplash,
+                limit=min(6, options.max_examples_per_section),
+                include_value=True,
+                heading="### Примеры строк по столешницам и фартукам",
+            )
+        )
     if _kitchen_has_wood_plus_neutral(facts):
         lines.append("Что важно: по извлечённым фактам часто встречается связка древесного декора и спокойного матового/нейтрального фасада.")
     else:
         lines.append("Что важно: выводы по фасадам ограничены теми формулировками, которые явно есть в цитатах.")
     lines.append("")
-    lines.extend(example_table(facts, limit=options.max_examples_per_section, include_value=True))
+    facade_first = sort_kitchen_examples_facades_first(facts)
+    lines.extend(example_table(facade_first, limit=options.max_examples_per_section, include_value=True))
     return lines
+
+
+def sort_kitchen_examples_facades_first(facts: list[EffectiveFact]) -> list[EffectiveFact]:
+    def weight(fact: EffectiveFact) -> int:
+        item_type = (fact.item_type or "").lower()
+        if item_type in {"kitchen_facades", "kitchen_facade"}:
+            return 3
+        if item_type in {"countertop", "backsplash"}:
+            return 2
+        if "фасад" in item_type or "столешн" in item_type or "фартук" in item_type:
+            return 2
+        return 1
+    return sorted(facts, key=weight, reverse=True)
 
 
 def build_sofas_section(
@@ -957,19 +1020,38 @@ def build_sofas_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
-    model_counts = count_values(facts, lambda fact: fact.model)
-    material_counts = count_values(facts, lambda fact: normalize_sofa_material(fact.material))
-    color_counts = count_values(facts, lambda fact: normalize_sofa_color(fact.color))
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    model_counts = count_display_values(facts, lambda fact: fact.model)
+    material_counts = count_display_values(facts, lambda fact: normalize_sofa_material(fact.material))
+    color_counts = count_display_values(facts, lambda fact: normalize_sofa_color(fact.color))
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
     lines.extend(subsection_counter("Поставщики", "Поставщик", vendor_counts, options.max_top_values))
     lines.extend(subsection_counter("Модели", "Модель", model_counts, options.max_top_values))
     lines.extend(subsection_counter("Материалы / ткани", "Материал", material_counts, options.max_top_values))
     lines.extend(subsection_counter("Цвета", "Цвет", color_counts, options.max_top_values))
-    lines.extend(example_table(facts, limit=options.max_examples_per_section, include_value=True))
+    example_pool = sort_sofas_examples(facts)
+    lines.extend(example_table(example_pool, limit=options.max_examples_per_section, include_value=True))
     lines.append("Bundles с общей ценой и строки, где диван был только контекстом, не включаются в основные выводы.")
     lines.append("")
     return lines
+
+
+def sort_sofas_examples(facts: list[EffectiveFact]) -> list[EffectiveFact]:
+    def weight(fact: EffectiveFact) -> int:
+        evidence = (fact.evidence_quote or "").casefold()
+        if any(token in evidence for token in ("оставшаяся мебель", "бюджет", "сертификат")):
+            return 0
+        score = 1
+        if fact.model:
+            score += 2
+        if fact.material:
+            score += 1
+        if fact.price_value is not None and fact.price_reliable:
+            score += 1
+        if fact.vendor or fact.marketplace:
+            score += 1
+        return score
+    return sorted(facts, key=weight, reverse=True)
 
 
 def build_chairs_section(
@@ -977,14 +1059,18 @@ def build_chairs_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
-    material_counts = count_values(facts, lambda fact: normalize_sofa_material(fact.material))
-    color_counts = count_values(facts, lambda fact: normalize_sofa_color(fact.color))
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    model_counts = count_display_values(facts, lambda fact: fact.model)
+    material_counts = count_display_values(facts, lambda fact: normalize_sofa_material(fact.material))
+    color_counts = count_display_values(facts, lambda fact: normalize_sofa_color(fact.color))
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
     lines.extend(subsection_counter("Поставщики / магазины", "Поставщик", vendor_counts, options.max_top_values))
+    lines.extend(subsection_counter("Модели", "Модель", model_counts, options.max_top_values))
     lines.extend(subsection_counter("Материалы", "Материал", material_counts, options.max_top_values))
     lines.extend(subsection_counter("Цвета", "Цвет", color_counts, options.max_top_values))
     lines.extend(example_table(facts, limit=options.max_examples_per_section, include_value=True))
+    lines.append("Артикулы маркетплейсов показаны только внутри цитат; в столбце «Значение» предпочитаются модели/материалы/цвета.")
+    lines.append("")
     return lines
 
 
@@ -993,17 +1079,30 @@ def build_tables_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    type_counts = count_values(facts, lambda fact: readable_item_type(fact.item_type))
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
-    article_counts = count_values(facts, lambda fact: fact.article_id)
+    type_counts = count_values(facts, lambda fact: display_item_type_ru(fact.item_type))
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    article_counts = count_display_values(facts, lambda fact: fact.article_id)
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
     lines.extend(subsection_counter("Типы столов", "Тип", type_counts, options.max_top_values))
     lines.extend(subsection_counter("Поставщики / магазины", "Поставщик", vendor_counts, options.max_top_values))
     lines.extend(subsection_counter("Артикулы", "Артикул", article_counts, options.max_top_values))
     lines.append("Журнальные столики относятся к разделу столов, включая строки, которые LLM исправил из мебели гостиной.")
     lines.append("")
-    lines.extend(example_table(facts, limit=options.max_examples_per_section, include_value=True))
+    example_pool = sort_tables_examples(facts)
+    lines.extend(example_table(example_pool, limit=options.max_examples_per_section, include_value=True))
     return lines
+
+
+def sort_tables_examples(facts: list[EffectiveFact]) -> list[EffectiveFact]:
+    def weight(fact: EffectiveFact) -> int:
+        item_type = (fact.item_type or "").lower()
+        evidence = (fact.evidence_quote or "").casefold()
+        if any(token in evidence for token in ("люстра", "бра", "торшер", "лампа")):
+            return 0
+        if item_type in {"dining_table", "kitchen_table", "coffee_table", "working_table", "table"}:
+            return 2
+        return 1
+    return sorted(facts, key=weight, reverse=True)
 
 
 def build_hallway_section(
@@ -1011,15 +1110,20 @@ def build_hallway_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    type_counts = count_values(facts, lambda fact: readable_item_type(fact.item_type))
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    type_counts = count_values(facts, lambda fact: display_item_type_ru(fact.item_type))
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    example_pool = filter_hallway_examples(facts)
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
     lines.extend(subsection_counter("Предметы", "Предмет", type_counts, options.max_top_values))
     lines.extend(subsection_counter("Поставщики / магазины", "Поставщик", vendor_counts, options.max_top_values))
-    lines.extend(example_table(facts, limit=options.max_examples_per_section, include_value=True))
+    lines.extend(example_table(example_pool, limit=options.max_examples_per_section, include_value=True))
     lines.append("Часть строк прихожей может быть набором нескольких предметов; такие строки лучше проверять вручную.")
     lines.append("")
     return lines
+
+
+def filter_hallway_examples(facts: list[EffectiveFact]) -> list[EffectiveFact]:
+    return [fact for fact in facts if (fact.item_type or "").lower() != "bundle_purchase"]
 
 
 def build_living_room_furniture_section(
@@ -1027,15 +1131,67 @@ def build_living_room_furniture_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    type_counts = count_values(facts, lambda fact: readable_item_type(fact.item_type))
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
-    lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
+    filtered = [fact for fact in facts if _living_room_keep(fact)]
+    type_counts = count_values(filtered, lambda fact: display_item_type_ru(fact.item_type))
+    vendor_counts = count_display_values(filtered, lambda fact: fact.vendor or fact.marketplace)
+    excluded_inline = len(facts) - len(filtered)
+    lines = [heading, "", f"Фактов в разделе: {len(filtered)}.", ""]
+    lines.append(
+        "Это самая шумная из широких категорий, поэтому ниже показаны только проверенные/достаточно чистые факты."
+    )
+    if excluded_inline:
+        word = _ru_plural_rows(excluded_inline)
+        lines.append(
+            f"_В этом разделе скрыто {excluded_inline} {word}, относящихся к прихожей, ванной, "
+            "журнальным столикам, ключницам, декору или общим эссе. Они остаются в `source_facts_used.csv`._"
+        )
+    lines.append("")
     lines.extend(subsection_counter("Типы мебели", "Тип", type_counts, options.max_top_values))
     lines.extend(subsection_counter("Поставщики / магазины", "Поставщик", vendor_counts, options.max_top_values))
-    lines.extend(example_table(facts, limit=options.max_examples_per_section, include_value=True))
+    example_limit = max(4, min(6, options.max_examples_per_section // 2))
+    lines.extend(example_table(filtered, limit=example_limit, include_value=True))
     lines.append("В раздел не включаются люстры, бра, постеры, пледы и строки, где гостиная указана только как контекст.")
     lines.append("")
     return lines
+
+
+def _ru_plural_rows(n: int) -> str:
+    n_abs = abs(int(n))
+    last_two = n_abs % 100
+    last = n_abs % 10
+    if 11 <= last_two <= 14:
+        return "строк"
+    if last == 1:
+        return "строка"
+    if 2 <= last <= 4:
+        return "строки"
+    return "строк"
+
+
+def _living_room_keep(fact: EffectiveFact) -> bool:
+    item_type = (fact.item_type or "").lower()
+    if item_type in {"coffee_table"}:
+        return False
+    if item_type in {"hallway_wardrobe", "shoe_cabinet", "hanger", "mirror", "pouf", "entry_group"}:
+        return False
+    if item_type in {"living_room_context_match"}:
+        return False
+    if item_type == "bundle_purchase":
+        return False
+    evidence = (fact.evidence_quote or "").casefold()
+    if any(token in evidence for token in ("в прихожей", "в прихожую", "в ванной", "в ванную", "для ключей", "санузел")):
+        return False
+    if item_type in {"shelves", "shelving"} and "ключ" in evidence:
+        return False
+    if any(token in evidence for token in ("люстра", "бра", "торшер", "постер", "плед")):
+        return False
+    if not is_display_value_useful(
+        summarize_value_for_report(fact),
+        category=fact.category,
+        item_type=item_type,
+    ) and not (fact.vendor or fact.brand or fact.model or fact.material):
+        return False
+    return True
 
 
 def build_generic_category_section(
@@ -1043,8 +1199,8 @@ def build_generic_category_section(
     facts: list[EffectiveFact],
     options: ReportOptions,
 ) -> list[str]:
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
-    value_counts = count_values(facts, primary_value)
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    value_counts = count_display_values(facts, summarize_value_for_report)
     lines = [heading, "", f"Фактов в разделе: {len(facts)}.", ""]
     lines.extend(subsection_counter("Поставщики / магазины", "Поставщик", vendor_counts, options.max_top_values))
     lines.extend(subsection_counter("Повторяющиеся значения", "Значение", value_counts, options.max_top_values))
@@ -1054,16 +1210,16 @@ def build_generic_category_section(
 
 def build_suppliers_section(dataset: ReportDataset, options: ReportOptions) -> list[str]:
     facts = dataset.facts
-    vendor_counts = count_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
     examples_by_vendor: dict[str, list[EffectiveFact]] = defaultdict(list)
     for fact in facts:
-        vendor = fact.vendor or fact.marketplace
-        if vendor:
+        vendor = clean_display_value(fact.vendor or fact.marketplace)
+        if vendor and is_display_value_useful(vendor, category=fact.category, item_type=fact.item_type):
             examples_by_vendor[vendor].append(fact)
     lines = [
         "## 9. Повторяющиеся поставщики и магазины",
         "",
-        "| Поставщик | Фактов | Где чаще встречается | Что чаще связано | Примеры |",
+        "| Поставщик | Фактов | Чаще встречается в разделах | Типичные позиции | Примеры |",
         "|---|---:|---|---|---|",
     ]
     if not vendor_counts:
@@ -1074,15 +1230,33 @@ def build_suppliers_section(dataset: ReportDataset, options: ReportOptions) -> l
             CATEGORY_TITLES[category]
             for category, _ in Counter(fact.category for fact in vendor_facts).most_common(3)
         )
-        values = ", ".join(
-            value for value, _ in count_values(vendor_facts, primary_value).most_common(3)
-        )
+        typical = _supplier_typical_items(vendor_facts)
         examples = "; ".join(short_quote(fact.evidence_quote, 90) for fact in select_examples(vendor_facts, limit=2))
         lines.append(
-            f"| {escape_md(vendor)} | {count} | {escape_md(where)} | {escape_md(values or 'позиции из цитат')} | {escape_md(examples)} |"
+            f"| {escape_md(vendor)} | {count} | {escape_md(where)} | {escape_md(typical)} | {escape_md(examples)} |"
         )
     lines.append("")
     return lines
+
+
+def _supplier_typical_items(vendor_facts: Sequence[EffectiveFact]) -> str:
+    cleaned = count_display_values(vendor_facts, summarize_value_for_report)
+    items = [value for value, _ in cleaned.most_common(3)]
+    if items:
+        return ", ".join(items)
+    item_type_counter = Counter(
+        display_item_type_ru(fact.item_type)
+        for fact in vendor_facts
+        if display_item_type_ru(fact.item_type)
+    )
+    typed = [
+        value for value, _ in item_type_counter.most_common(3) if value
+    ]
+    if typed:
+        return ", ".join(typed)
+    categories = Counter(fact.category for fact in vendor_facts)
+    cats = [CATEGORY_TITLES.get(c, c) for c, _ in categories.most_common(3)]
+    return ", ".join(cats) if cats else "—"
 
 
 def build_manual_review_section(dataset: ReportDataset) -> list[str]:
@@ -1154,10 +1328,239 @@ def build_technical_appendix(
         f"- LLM review DB: {review_paths}.",
         f"- В отчёт вошло фактов: {len(dataset.facts)}.",
         f"- Исключено фактов: {len(dataset.excluded)}.",
+        f"- Скрыто шумных значений в агрегатах: {dataset.display_values_suppressed} (см. `data_quality_notes.md`).",
+        "- Короткая версия для отца: `father_report_short.md`.",
         "- Нет OCR/VLM, нет анализа изображений, нет HTML/PDF, нет новых LLM-вызовов.",
         "- Это черновая доказательная база для человека, а не финальный дизайн-проект.",
         "",
     ]
+
+
+def build_short_report_markdown(
+    dataset: ReportDataset,
+    options: ReportOptions,
+    generated_at: str,
+) -> str:
+    facts = dataset.facts
+    by_category: dict[str, list[EffectiveFact]] = defaultdict(list)
+    for fact in facts:
+        by_category[fact.category].append(fact)
+
+    lines: list[str] = [
+        "# Короткая шпаргалка по решениям Мирзабаевой",
+        "",
+        "_Это сжатая версия отчёта. Её можно показать отцу первой, перед длинной шпаргалкой._",
+        "",
+        f"_Сгенерировано локально: {generated_at}. Формат: Markdown. Без анализа фото и без LLM-вызовов на этом этапе._",
+        "",
+        "## Главное",
+        "",
+    ]
+    for bullet in _short_report_main_bullets(facts, by_category, dataset):
+        lines.append(f"- {bullet}")
+    lines.append("")
+
+    lines.extend(["## Что можно взять как ориентир", ""])
+    for category in MAIN_SECTION_ORDER:
+        cat_facts = by_category.get(category, [])
+        lines.extend(_short_report_category_block(category, cat_facts))
+
+    lines.extend(
+        [
+            "## Что пока перепроверить вручную",
+            "",
+            "- Пол: данных меньше, часть строк по плитке может быть про ванную или фартук, а не пол.",
+            "- Мебель гостиной: широкая категория; легко смешать со строками о прихожей, ключницах и декоре.",
+            "- Bundles с одной общей ценой: одна сумма на несколько предметов — выводы по цене ненадёжны.",
+            "- Цены извлечены из постов прошлых дат и могут быть устаревшими.",
+            "- Это черновая шпаргалка по тексту постов, без анализа фото и без новых вызовов LLM.",
+            "- Полная версия с цитатами и таблицами — в файле `father_report.md`.",
+            "",
+        ]
+    )
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _short_report_main_bullets(
+    facts: Sequence[EffectiveFact],
+    by_category: dict[str, list[EffectiveFact]],
+    dataset: ReportDataset,
+) -> list[str]:
+    bullets: list[str] = []
+    all_vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    wall_codes = count_display_values(
+        by_category.get("wall_colors", []),
+        lambda fact: normalize_wall_color_code(fact.color_code or fact.color),
+    )
+    if wall_codes.get("G482"):
+        bullets.append(
+            f"Цвет стен: чаще всего повторяется код `G482` (упомин.: {wall_codes['G482']})."
+        )
+    if all_vendor_counts.get("Mebel.in"):
+        bullets.append(
+            "Кухни: часто упоминается `Mebel.in`; фасады — древесный декор плюс спокойный матовый/нейтральный тон."
+        )
+    if all_vendor_counts.get("Divan.ru"):
+        bullets.append(
+            "Диваны: часто `Divan.ru`; ткани — велюр/букле, цвета — нейтральные, зелёные/оливковые, светлые."
+        )
+    chair_facts = by_category.get("chairs", [])
+    if chair_facts:
+        chair_vendors = count_display_values(chair_facts, lambda fact: fact.vendor or fact.marketplace)
+        top = ", ".join(f"`{v}`" for v, _ in chair_vendors.most_common(2) if v) or "магазинов мало"
+        bullets.append(f"Стулья: основные точки заказа — {top}; ткани преимущественно нейтральные.")
+    flooring_facts = by_category.get("flooring", [])
+    if flooring_facts:
+        bullets.append(
+            "Пол: выборка небольшая, но повторяются строки про Alpine Floor / SPC и плитку/керамогранит на пол."
+        )
+    hallway_facts = by_category.get("hallway", [])
+    if hallway_facts:
+        bullets.append(
+            "Прихожая: чаще всего — зеркала, вешалки, обувницы и пуфы; точки заказа — маркетплейсы и `Divan.ru`."
+        )
+    marketplaces = ", ".join(
+        f"`{shop}`"
+        for shop in ("OZON", "Wildberries", "Yandex Market")
+        if all_vendor_counts.get(shop)
+    )
+    if marketplaces:
+        bullets.append(
+            f"Маркетплейсы ({marketplaces}) повторяются для отдельных артикулов и точечных позиций."
+        )
+    if dataset.applied_fix_count:
+        bullets.append(
+            f"LLM-слой применил {dataset.applied_fix_count} исправлений; discard/needs_human в основные выводы не попали."
+        )
+    if not bullets:
+        bullets.append("В выборке мало повторов для коротких выводов — стоит сначала проверить полную шпаргалку.")
+    return bullets[:8]
+
+
+def _short_report_category_block(
+    category: str,
+    facts: list[EffectiveFact],
+) -> list[str]:
+    title = CATEGORY_TITLES.get(category, category)
+    lines = [f"### {title}", ""]
+    if not facts:
+        lines.append("- Сейчас в этой категории мало надёжных строк для коротких выводов.")
+        lines.append("")
+        return lines
+
+    vendor_counts = count_display_values(facts, lambda fact: fact.vendor or fact.marketplace)
+    bullets: list[str] = []
+
+    if category == "wall_colors":
+        codes = count_display_values(
+            facts, lambda fact: normalize_wall_color_code(fact.color_code or fact.color)
+        )
+        top_codes = ", ".join(f"`{v}` ({c})" for v, c in codes.most_common(3))
+        if top_codes:
+            bullets.append(f"Чаще всего: {top_codes}.")
+        bullets.append("Цвет лучше проверить вживую: вид на стене зависит от света и площади.")
+    elif category == "flooring":
+        materials = count_display_values(
+            facts,
+            lambda fact: normalize_flooring_material(fact.material or fact.brand or fact.finish or ""),
+        )
+        top_mat = ", ".join(f"`{v}`" for v, _ in materials.most_common(3))
+        if top_mat:
+            bullets.append(f"Повторяющиеся материалы: {top_mat}.")
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Точки заказа: {top_vendors}.")
+        bullets.append("Выборка по полу небольшая — это ориентир, а не итог.")
+    elif category == "kitchens":
+        finishes = count_display_values(
+            [fact for fact in facts if fact.finish or "фасад" in (fact.item_type or "").lower()],
+            lambda fact: normalize_kitchen_finish(fact.finish or fact.model or fact.color),
+        )
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Где чаще заказывает: {top_vendors}.")
+        top_finishes = ", ".join(f"`{v}`" for v, _ in finishes.most_common(3))
+        if top_finishes:
+            bullets.append(f"Повторяющиеся фасады: {top_finishes}.")
+        if _kitchen_has_wood_plus_neutral(facts):
+            bullets.append("Паттерн: древесный декор плюс спокойный матовый/нейтральный фасад.")
+    elif category == "sofas":
+        models = count_display_values(facts, lambda fact: fact.model)
+        materials = count_display_values(facts, lambda fact: normalize_sofa_material(fact.material))
+        colors = count_display_values(facts, lambda fact: normalize_sofa_color(fact.color))
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Точки заказа: {top_vendors}.")
+        if models:
+            top_models = ", ".join(f"`{v}`" for v, _ in models.most_common(3))
+            bullets.append(f"Модели, которые повторяются: {top_models}.")
+        if materials:
+            top_mat = ", ".join(f"`{v}`" for v, _ in materials.most_common(3))
+            bullets.append(f"Ткани: {top_mat}.")
+        if colors:
+            top_colors = ", ".join(f"`{v}`" for v, _ in colors.most_common(3))
+            bullets.append(f"Цвета: {top_colors}.")
+    elif category == "chairs":
+        materials = count_display_values(facts, lambda fact: normalize_sofa_material(fact.material))
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Точки заказа: {top_vendors}.")
+        if materials:
+            top_mat = ", ".join(f"`{v}`" for v, _ in materials.most_common(3))
+            bullets.append(f"Ткани/материалы: {top_mat}.")
+    elif category == "tables":
+        types = count_values(facts, lambda fact: display_item_type_ru(fact.item_type))
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Точки заказа: {top_vendors}.")
+        if types:
+            top_types = ", ".join(f"`{v}`" for v, _ in types.most_common(3))
+            bullets.append(f"Типы столов: {top_types}.")
+    elif category == "hallway":
+        types = count_values(facts, lambda fact: display_item_type_ru(fact.item_type))
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Точки заказа: {top_vendors}.")
+        if types:
+            top_types = ", ".join(f"`{v}`" for v, _ in types.most_common(3))
+            bullets.append(f"Что чаще встречается: {top_types}.")
+    elif category == "living_room_furniture":
+        filtered = [fact for fact in facts if _living_room_keep(fact)]
+        types = count_values(filtered, lambda fact: display_item_type_ru(fact.item_type))
+        if vendor_counts:
+            top_vendors = ", ".join(f"`{v}`" for v, _ in vendor_counts.most_common(3))
+            bullets.append(f"Точки заказа: {top_vendors}.")
+        if types:
+            top_types = ", ".join(f"`{v}`" for v, _ in types.most_common(3))
+            bullets.append(f"Чистые типы мебели: {top_types}.")
+        bullets.append("Это самая шумная категория — итог стоит сверить с полной шпаргалкой.")
+
+    for bullet in bullets[:5]:
+        lines.append(f"- {bullet}")
+
+    example_pool: list[EffectiveFact]
+    if category == "living_room_furniture":
+        example_pool = [fact for fact in facts if _living_room_keep(fact)]
+    else:
+        example_pool = list(facts)
+    examples = select_examples(example_pool, limit=3)
+    clean_examples = [
+        ex for ex in examples if is_display_value_useful(
+            summarize_value_for_report(ex),
+            category=ex.category,
+            item_type=ex.item_type,
+        )
+    ][:2]
+    if not clean_examples:
+        clean_examples = examples[:2]
+    if clean_examples:
+        lines.append("")
+        lines.append("Примеры из постов:")
+        for ex in clean_examples:
+            quote = short_quote(ex.evidence_quote, 110)
+            lines.append(f"  - {quote}")
+    lines.append("")
+    return lines
 
 
 def build_summary_markdown(
@@ -1176,6 +1579,17 @@ def build_summary_markdown(
         f"- LLM review rows loaded: {dataset.review_count}",
         f"- LLM fix decisions applied: {dataset.applied_fix_count}",
         f"- Prices suppressed as unreliable: {dataset.price_suppressed_count}",
+        f"- Display values suppressed (noisy/room-context/essay): {dataset.display_values_suppressed}",
+        "",
+        "## Output files",
+        "",
+        "- `father_report.md` — full evidence-based cheat sheet",
+        "- `father_report_short.md` — short version safe to show to father first",
+        "- `father_report_summary.md` — this file",
+        "- `data_quality_notes.md` — limitations and quality cleanup notes",
+        "- `category_sections/*.md` — per-category Markdown sections",
+        "- `source_facts_used.csv` — full underlying facts used in the report",
+        "- `source_facts_excluded.csv` — facts excluded with reason",
         "",
         "## Category Counts",
         "",
@@ -1252,6 +1666,15 @@ def build_data_quality_notes(
         lines.append("| none | 0 |")
     lines.extend(
         [
+            "",
+            "## Stage 3.1 cleanup",
+            "",
+            "- Stage 3.1 suppresses noisy display values (room contexts like `в прихожей`, pure article numbers, essay fragments, fragments like `Арт`, etc.) only inside report aggregations and example tables.",
+            "- Source rows remain auditable in `source_facts_used.csv`; nothing is deleted from the deterministic database.",
+            f"- Display values suppressed inside the main report: {dataset.display_values_suppressed}.",
+            "- A short curated version is generated as `father_report_short.md`. It is safer to show to the father first.",
+            "- Internal item type labels (`flooring_laminate`, `kitchen_facades`, `coffee_table`, etc.) are rendered as Russian phrases.",
+            "- Kitchens section uses two distinct evidence headings (countertops/backsplash and main examples) so the same heading is not repeated.",
             "",
             "## Limitations",
             "",
@@ -1332,6 +1755,25 @@ def count_values(
     return counter
 
 
+def count_display_values(
+    facts: Iterable[EffectiveFact],
+    extractor: Any,
+) -> Counter[str]:
+    """Like count_values but filters out values that should not be shown to the father."""
+    counter: Counter[str] = Counter()
+    for fact in facts:
+        value = extractor(fact)
+        if value is None:
+            continue
+        cleaned = clean_display_value(value)
+        if cleaned is None:
+            continue
+        if not is_display_value_useful(cleaned, category=fact.category, item_type=fact.item_type):
+            continue
+        counter[cleaned] += 1
+    return counter
+
+
 def subsection_counter(title: str, label: str, counter: Counter[str], limit: int) -> list[str]:
     return [f"### {title}", "", *counter_table(label, counter, limit)]
 
@@ -1353,8 +1795,9 @@ def example_table(
     *,
     limit: int,
     include_value: bool = False,
+    heading: str = "### Примеры доказательств",
 ) -> list[str]:
-    lines = ["### Примеры доказательств", ""]
+    lines = [heading, ""]
     if not facts:
         lines.extend(
             [
@@ -1367,9 +1810,10 @@ def example_table(
         lines.append("| Дата | message_id | Значение | Поставщик | Цена | Цитата |")
         lines.append("|---|---:|---|---|---:|---|")
         for fact in select_examples(facts, limit=limit):
+            value = summarize_value_for_report(fact) or ""
             lines.append(
                 f"| {escape_md(fact.source_date or '')} | {fact.source_message_id} | "
-                f"{escape_md(primary_value(fact) or '')} | {escape_md(fact.vendor or fact.marketplace or '')} | "
+                f"{escape_md(value)} | {escape_md(fact.vendor or fact.marketplace or '')} | "
                 f"{escape_md(format_price(fact))} | {escape_md(fact.evidence_quote)} |"
             )
     else:
@@ -1415,30 +1859,237 @@ def primary_value(fact: EffectiveFact) -> str | None:
     return fact.model or fact.finish or fact.material or fact.color or fact.article_id
 
 
-def readable_item_type(item_type: str | None) -> str | None:
+DISPLAY_ITEM_TYPE_RU = {
+    "flooring": "напольное покрытие",
+    "flooring_laminate": "ламинат / SPC / кварцвинил",
+    "flooring_tile": "плитка / керамогранит",
+    "wall_color": "цвет стен",
+    "wall_color_accent": "акцентный цвет",
+    "kitchen_facades": "фасады кухни",
+    "kitchen_facade": "фасады кухни",
+    "backsplash": "фартук",
+    "countertop": "столешница",
+    "sofa": "диван",
+    "chair": "стул / стулья",
+    "table": "стол",
+    "dining_table": "обеденный стол",
+    "kitchen_table": "кухонный стол",
+    "coffee_table": "журнальный столик",
+    "working_table": "рабочий стол",
+    "table_base": "подстолье",
+    "hallway_wardrobe": "шкаф в прихожей",
+    "shoe_cabinet": "обувница",
+    "hanger": "вешалка",
+    "mirror": "зеркало",
+    "console": "консоль",
+    "pouf": "пуф",
+    "tv_unit": "ТВ-тумба",
+    "cabinet": "шкаф / тумба",
+    "shelves": "полки / стеллаж",
+    "shelving": "полки / стеллаж",
+    "commode": "комод",
+    "chest": "комод",
+    "bundle_purchase": "набор / bundle",
+    "entry_group": "входная зона",
+    "living_room_context_match": "контекст гостиной",
+    "kitchen_accessory": "кухонная мелочь",
+}
+
+
+_BAD_DISPLAY_VALUES_LOWER = {
+    "",
+    "арт",
+    "арт.",
+    "артикул",
+    "art",
+    "art.",
+    "на пол",
+    "на полу",
+    "в кабинете",
+    "в гостиной",
+    "в гостинной",
+    "на кухне",
+    "в прихожей",
+    "в прихожую",
+    "в ванной",
+    "в ванную",
+    "в спальне",
+    "в спальню",
+    "в детской",
+    "в детскую",
+    "для ключей",
+    "рабочее",
+    "рабочий",
+    "кухонный",
+    "кухонные",
+    "кухонная",
+    "2шт",
+    "2 шт",
+    "1шт",
+    "1 шт",
+    "позиции из цитат",
+}
+
+
+_ESSAY_FRAGMENTS_LOWER = (
+    "задача:",
+    "практически, как на заказ",
+    "обратите внимание",
+    "выбрав нужную",
+    "сразу кажется",
+    "который обойдется",
+    "который обойдётся",
+    "модель и ткань",
+    "обязательно раскладной",
+)
+
+
+_ROOM_CONTEXT_PHRASES_LOWER = (
+    "в прихожей",
+    "в прихожую",
+    "в кабинете",
+    "в гостиной",
+    "в гостинной",
+    "на кухне",
+    "в ванной",
+    "в ванную",
+    "в спальне",
+    "в спальню",
+    "в детской",
+    "в детскую",
+    "для ключей",
+    "на пол",
+    "на полу",
+)
+
+
+_WALL_CODE_DISPLAY_RE = re.compile(
+    r"^(?:"
+    r"G\s*\d{3}"
+    r"|RAL\s*\d{3,4}"
+    r"|NCS\s*[A-Z0-9\s/\-]+"
+    r"|\d{2}\s*[A-Z]{2}\s*\d{2}/\d{3}"
+    r")$",
+    flags=re.IGNORECASE,
+)
+
+
+_PURE_ARTICLE_RE = re.compile(r"^[\d][\d\s\-_/]*$")
+_ARTICLE_WITH_PREFIX_RE = re.compile(r"^арт\.?\s*[\d\-/\s]+$", flags=re.IGNORECASE)
+_PURE_PRICE_RE = re.compile(
+    r"^[\d\s.,]+\s*(?:руб\.?|₽|rub)\s*(?:/?\s*(?:шт|м2|м²|м|кг|компл(?:ект)?))?\s*$",
+    flags=re.IGNORECASE,
+)
+
+
+def is_display_value_useful(
+    value: Any,
+    *,
+    category: str | None = None,
+    item_type: str | None = None,
+) -> bool:
+    """Return True if a value is safe to surface as a model/value/top-item in the report."""
+    cleaned = clean_display_value(value)
+    if cleaned is None:
+        return False
+    lowered = cleaned.casefold()
+
+    if lowered in _BAD_DISPLAY_VALUES_LOWER:
+        return False
+    if any(fragment in lowered for fragment in _ESSAY_FRAGMENTS_LOWER):
+        return False
+    if any(phrase in lowered for phrase in _ROOM_CONTEXT_PHRASES_LOWER):
+        return False
+
+    if _ARTICLE_WITH_PREFIX_RE.match(cleaned):
+        return False
+
+    if _PURE_PRICE_RE.match(cleaned):
+        return False
+
+    if _WALL_CODE_DISPLAY_RE.match(cleaned):
+        return True
+
+    if len(cleaned) < 3:
+        return False
+
+    if _PURE_ARTICLE_RE.match(cleaned):
+        return False
+
+    if len(cleaned) > 90:
+        if item_type == "kitchen_facades" and " + " in cleaned:
+            return True
+        return False
+
+    return True
+
+
+def clean_display_value(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = compact_whitespace(str(value)).strip()
+    text = text.strip(" .,:;–—-")
+    text = compact_whitespace(text)
+    if not text:
+        return None
+    return text
+
+
+def display_item_type_ru(item_type: str | None) -> str | None:
     if not item_type:
         return None
-    labels = {
-        "wall_color": "цвет стен",
-        "kitchen_facades": "кухонные фасады",
-        "countertop": "столешница",
-        "backsplash": "фартук",
-        "flooring": "напольное покрытие",
-        "flooring_tile": "плитка на пол",
-        "sofa": "диван",
-        "chair": "стул/кресло",
-        "table": "стол",
-        "coffee_table": "журнальный столик",
-        "bundle_purchase": "набор / bundle",
-        "hanger": "вешалка",
-        "mirror": "зеркало",
-        "pouf": "пуф",
-        "cabinet": "шкаф/тумба",
-        "tv_unit": "ТВ-тумба",
-        "chest": "комод",
-        "shelving": "стеллаж/полки",
-    }
-    return labels.get(item_type, item_type.replace("_", " "))
+    cleaned = compact_whitespace(str(item_type)).strip()
+    if not cleaned:
+        return None
+    if cleaned in DISPLAY_ITEM_TYPE_RU:
+        return DISPLAY_ITEM_TYPE_RU[cleaned]
+    return cleaned.replace("_", " ").strip()
+
+
+def display_category_ru(category: str | None) -> str | None:
+    if not category:
+        return None
+    return CATEGORY_TITLES.get(category, category.replace("_", " "))
+
+
+def summarize_value_for_report(fact: EffectiveFact) -> str | None:
+    """Return the cleanest single value to show for a fact, or None if nothing useful."""
+    candidates: list[str | None]
+    if fact.category == "wall_colors":
+        candidates = [fact.color_code, fact.color]
+    elif fact.category == "kitchens":
+        candidates = [fact.finish, fact.model, fact.material, fact.color]
+    elif fact.category == "sofas":
+        candidates = [
+            fact.model,
+            normalize_sofa_material(fact.material),
+            normalize_sofa_color(fact.color),
+            fact.material,
+            fact.color,
+        ]
+    elif fact.category == "flooring":
+        candidates = [
+            normalize_flooring_material(fact.material or fact.brand or fact.finish or ""),
+            fact.brand,
+            fact.model,
+        ]
+    elif fact.category == "chairs":
+        candidates = [fact.model, fact.material, fact.color]
+    else:
+        candidates = [
+            fact.model,
+            fact.finish,
+            fact.material,
+            fact.color,
+        ]
+    for value in candidates:
+        if is_display_value_useful(value, category=fact.category, item_type=fact.item_type):
+            return clean_display_value(value)
+    return None
+
+
+def readable_item_type(item_type: str | None) -> str | None:
+    return display_item_type_ru(item_type)
 
 
 def format_price(fact: EffectiveFact) -> str:

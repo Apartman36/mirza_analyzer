@@ -313,6 +313,7 @@ Generated outputs:
 ```text
 outputs/father_report/
   father_report.md
+  father_report_short.md
   father_report_summary.md
   data_quality_notes.md
   source_facts_used.csv
@@ -327,6 +328,13 @@ outputs/father_report/
     hallway.md
     living_room_furniture.md
 ```
+
+Stage 3.1 adds a short curated `father_report_short.md` (2–4 pages), filters
+noisy display values out of report aggregations (room contexts like
+`в прихожей`, pure article numbers, essay fragments, `Арт`, etc.) without
+deleting source rows, renders internal item types (`flooring_laminate`,
+`kitchen_facades`, `coffee_table`, …) as Russian phrases, and removes the
+duplicated evidence heading in the kitchens section.
 
 Stage 3 does **not** implement HTML, PDF, OCR, VLM/image analysis, Telegram
 comments sync, dashboards, OpenRouter, new scraping, or new LLM calls. All

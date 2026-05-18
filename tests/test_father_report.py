@@ -8,11 +8,18 @@ import pytest
 
 from mirza_analyzer.cli import main
 from mirza_analyzer.father_report import (
+    CATEGORY_TITLES,
+    DISPLAY_ITEM_TYPE_RU,
     FATHER_CATEGORIES,
     ReportOptions,
     build_father_report,
     build_report_dataset,
+    clean_display_value,
+    count_display_values,
     count_values,
+    display_category_ru,
+    display_item_type_ru,
+    is_display_value_useful,
     load_llm_reviews,
     load_source_facts,
     normalize_wall_color_code,
@@ -546,3 +553,503 @@ def test_cli_father_report_command_and_unsupported_format(tmp_path: Path) -> Non
                 "html",
             ]
         )
+
+
+# ---------------------------------------------------------------------------
+# Stage 3.1: report-level cleanup, item-type labels, short report
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "   ",
+        "Арт",
+        "Арт.",
+        "арт",
+        "Артикул",
+        "на пол",
+        "в кабинете",
+        "в гостиной",
+        "на кухне",
+        "в прихожей",
+        "в ванной",
+        "в спальне",
+        "в детской",
+        "для ключей",
+        "рабочее",
+        "кухонный",
+        "2шт",
+        "2 шт",
+        "1876847138",
+        "1 876 847 138",
+        "Арт. 1876847138",
+        "5768₽",
+        "5768 руб",
+        "5768 руб/шт",
+        "Задача: продумать прихожую целиком и подобрать все элементы единым стилем.",
+        "Это практически, как на заказ — выбрав нужную модель и ткань, можно сэкономить",
+    ],
+)
+def test_is_display_value_useful_suppresses_bad_values(value: str) -> None:
+    assert not is_display_value_useful(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "G482",
+        "RAL 7047",
+        "30YY 72/018",
+        "Дуб каселла + Капучино",
+        "Velvet Light",
+        "Bucle White",
+        "Спейс-1",
+        "Слипсон",
+        "Лилле",
+        "Ларсон",
+        "Alpine Floor ECO 13-16 Дуб Фафнир",
+    ],
+)
+def test_is_display_value_useful_keeps_legit_values(value: str) -> None:
+    assert is_display_value_useful(value)
+
+
+def test_is_display_value_useful_allows_long_facade_combination() -> None:
+    long_facade = "Дуб каселла + Капучино + Эбони СС1106 + Велюр матовый + Тальк + Greige"
+    assert len(long_facade) > 60
+    assert is_display_value_useful(long_facade, item_type="kitchen_facades")
+
+
+def test_is_display_value_useful_rejects_long_essay_even_for_facades() -> None:
+    essay = (
+        "Задача: продумать кухню целиком, обратите внимание на сочетание древесного декора и "
+        "матового нейтрального тона; модель и ткань подбираются вместе"
+    )
+    assert not is_display_value_useful(essay, item_type="kitchen_facades")
+
+
+def test_clean_display_value_strips_punctuation_and_whitespace() -> None:
+    assert clean_display_value("  Velvet Light .  ") == "Velvet Light"
+    assert clean_display_value(None) is None
+    assert clean_display_value("   ") is None
+
+
+def test_display_item_type_ru_maps_internal_labels() -> None:
+    assert display_item_type_ru("flooring_laminate") == "ламинат / SPC / кварцвинил"
+    assert display_item_type_ru("kitchen_facades") == "фасады кухни"
+    assert display_item_type_ru("coffee_table") == "журнальный столик"
+    assert display_item_type_ru("hallway_wardrobe") == "шкаф в прихожей"
+    assert display_item_type_ru("entry_group") == "входная зона"
+    assert display_item_type_ru("living_room_context_match") == "контекст гостиной"
+
+
+def test_display_item_type_ru_cleans_unknown_snake_case() -> None:
+    assert display_item_type_ru("some_unknown_thing") == "some unknown thing"
+    assert display_item_type_ru(None) is None
+
+
+def test_display_category_ru_uses_known_titles() -> None:
+    assert display_category_ru("kitchens") == CATEGORY_TITLES["kitchens"]
+    assert display_category_ru("flooring") == CATEGORY_TITLES["flooring"]
+    assert display_category_ru(None) is None
+
+
+def test_count_display_values_filters_noisy_values(tmp_path: Path) -> None:
+    facts_db = _make_facts_db(
+        tmp_path / "facts.sqlite",
+        [
+            {
+                "id": 1,
+                "source_message_id": 901,
+                "category": "sofas",
+                "item_type": "sofa",
+                "model": "Спейс-1",
+                "evidence_quote": "Диван Спейс-1 Divan.ru",
+                "confidence": "high",
+            },
+            {
+                "id": 2,
+                "source_message_id": 902,
+                "category": "sofas",
+                "item_type": "sofa",
+                "model": "в кабинете",
+                "evidence_quote": "Диван в кабинете",
+                "confidence": "high",
+            },
+            {
+                "id": 3,
+                "source_message_id": 903,
+                "category": "sofas",
+                "item_type": "sofa",
+                "model": "Арт",
+                "evidence_quote": "Арт что-то Divan.ru",
+                "confidence": "high",
+            },
+        ],
+    )
+    dataset = build_report_dataset(load_source_facts(facts_db), {}, ReportOptions())
+    counts = count_display_values(dataset.facts, lambda fact: fact.model)
+    assert counts["Спейс-1"] == 1
+    assert "в кабинете" not in counts
+    assert "Арт" not in counts
+
+
+def _stage_31_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    facts_db = tmp_path / "facts.sqlite"
+    review_db = tmp_path / "llm_review.sqlite"
+    _make_facts_db(
+        facts_db,
+        [
+            {
+                "id": 10,
+                "source_message_id": 1010,
+                "category": "wall_colors",
+                "item_type": "wall_color",
+                "color_code": "G482",
+                "evidence_quote": "Цвет стен G482",
+                "confidence": "high",
+            },
+            {
+                "id": 11,
+                "source_message_id": 1011,
+                "category": "kitchens",
+                "item_type": "kitchen_facades",
+                "vendor_normalized": "Mebel.in",
+                "finish": "Дуб каселла+Эбони СС1106",
+                "evidence_quote": "Кухня фасады Дуб каселла+Эбони СС1106 Mebel.in 330 000₽",
+                "confidence": "high",
+            },
+            {
+                "id": 12,
+                "source_message_id": 1012,
+                "category": "kitchens",
+                "item_type": "kitchen_facades",
+                "finish": "Арт",
+                "evidence_quote": "Кухня Арт",
+                "confidence": "medium",
+            },
+            {
+                "id": 13,
+                "source_message_id": 1013,
+                "category": "sofas",
+                "item_type": "sofa",
+                "vendor_normalized": "Divan.ru",
+                "model": "Слипсон",
+                "material": "Velvet Light",
+                "evidence_quote": "Диван Слипсон Velvet Light Divan.ru",
+                "confidence": "high",
+            },
+            {
+                "id": 14,
+                "source_message_id": 1014,
+                "category": "sofas",
+                "item_type": "sofa",
+                "model": "в кабинете",
+                "evidence_quote": "Диван в кабинете",
+                "confidence": "medium",
+            },
+            {
+                "id": 15,
+                "source_message_id": 1015,
+                "category": "chairs",
+                "item_type": "chair",
+                "vendor_normalized": "OZON",
+                "model": "Арт. 123",
+                "article_id": "123",
+                "evidence_quote": "Стул OZON Арт. 123 4990₽",
+                "confidence": "medium",
+            },
+            {
+                "id": 16,
+                "source_message_id": 1016,
+                "category": "flooring",
+                "item_type": "flooring_laminate",
+                "brand_normalized": "Alpine Floor",
+                "material": "Alpine Floor ECO 13-16 Дуб Фафнир",
+                "vendor_normalized": "Лемана Про",
+                "evidence_quote": "Пол Alpine Floor ECO 13-16 Дуб Фафнир Лемана Про",
+                "confidence": "high",
+            },
+            {
+                "id": 17,
+                "source_message_id": 1017,
+                "category": "living_room_furniture",
+                "item_type": "shelves",
+                "evidence_quote": "Полки в прихожей для ключей",
+                "confidence": "medium",
+            },
+            {
+                "id": 18,
+                "source_message_id": 1018,
+                "category": "living_room_furniture",
+                "item_type": "coffee_table",
+                "vendor_normalized": "OZON",
+                "evidence_quote": "Журнальный столик OZON",
+                "confidence": "medium",
+            },
+            {
+                "id": 19,
+                "source_message_id": 1019,
+                "category": "living_room_furniture",
+                "item_type": "tv_unit",
+                "vendor_normalized": "Mebel.in",
+                "model": "Ларсон",
+                "evidence_quote": "ТВ-тумба Ларсон Mebel.in",
+                "confidence": "high",
+            },
+            {
+                "id": 20,
+                "source_message_id": 1020,
+                "category": "tables",
+                "item_type": "coffee_table",
+                "vendor_normalized": "Divan.ru",
+                "model": "Лилле",
+                "evidence_quote": "Журнальный столик Лилле Divan.ru",
+                "confidence": "high",
+            },
+            {
+                "id": 21,
+                "source_message_id": 1021,
+                "category": "hallway",
+                "item_type": "mirror",
+                "vendor_normalized": "VERESK",
+                "evidence_quote": "Зеркало VERESK в прихожую",
+                "confidence": "high",
+            },
+            {
+                "id": 22,
+                "source_message_id": 1022,
+                "category": "hallway",
+                "item_type": "shoe_cabinet",
+                "vendor_normalized": "OZON",
+                "evidence_quote": "Обувница OZON",
+                "confidence": "high",
+            },
+        ],
+    )
+    _make_review_db(
+        review_db,
+        [
+            {
+                "fact_id": 18,
+                "source_message_id": 1018,
+                "original_category": "living_room_furniture",
+                "original_item_type": "coffee_table",
+                "decision": "fix",
+                "category_correct": 0,
+                "corrected_json": json.dumps({"category": "tables", "item_type": "coffee_table"}),
+                "rationale_short": "coffee table belongs to tables",
+            },
+        ],
+    )
+    return facts_db, review_db
+
+
+def test_kitchens_section_has_no_duplicate_evidence_heading(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+
+    section = (out_dir / "category_sections" / "kitchens.md").read_text(encoding="utf-8")
+    assert section.count("### Примеры доказательств") == 1
+
+    full_report = (out_dir / "father_report.md").read_text(encoding="utf-8")
+    kitchens_heading = "## 3. Кухни и фасады"
+    assert kitchens_heading in full_report
+    kitchens_index = full_report.index(kitchens_heading)
+    next_heading = "## 4."
+    end_index = full_report.index(next_heading, kitchens_index)
+    kitchens_block = full_report[kitchens_index:end_index]
+    assert kitchens_block.count("### Примеры доказательств") == 1
+
+
+def test_living_room_section_excludes_hallway_bathroom_and_coffee_tables(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    section = (out_dir / "category_sections" / "living_room_furniture.md").read_text(encoding="utf-8")
+    assert "в прихожей для ключей" not in section
+    assert "Журнальный столик" not in section
+    assert "Ларсон" in section
+
+
+def test_tables_section_contains_corrected_coffee_table(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    tables_section = (out_dir / "category_sections" / "tables.md").read_text(encoding="utf-8")
+    assert "Лилле" in tables_section
+    assert "журнальный столик" in tables_section.lower()
+
+
+def test_report_uses_russian_item_type_labels(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    flooring_section = (out_dir / "category_sections" / "flooring.md").read_text(encoding="utf-8")
+    assert "ламинат / SPC / кварцвинил" in flooring_section
+    assert "flooring_laminate" not in flooring_section
+
+
+def test_short_report_is_generated_and_clean(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    result = build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    short_path = out_dir / "father_report_short.md"
+    assert short_path.exists()
+    assert short_path in result.output_files
+
+    content = short_path.read_text(encoding="utf-8")
+    assert "Короткая шпаргалка" in content
+    for title in CATEGORY_TITLES.values():
+        assert title in content, f"missing father category title in short report: {title}"
+    for snake in (
+        "flooring_laminate",
+        "kitchen_facades",
+        "coffee_table",
+        "hallway_wardrobe",
+        "living_room_context_match",
+    ):
+        assert snake not in content, f"raw snake_case leaked into short report: {snake}"
+    # "в прихожей для ключей" must be fully suppressed (it was a shelves-in-hallway leak
+    # into living_room examples).
+    assert "в прихожей для ключей" not in content
+    # "Арт. 123" must not appear as a bullet "Модели" value. It is allowed inside
+    # an evidence quote per spec, so check only non-quote bullet lines starting with `- `
+    # or `  - `.
+    bullet_lines = [
+        line
+        for line in content.splitlines()
+        if line.lstrip().startswith("- ") and "Модели" in line
+    ]
+    for line in bullet_lines:
+        assert "Арт. 123" not in line, f"article id leaked into models bullet: {line}"
+
+
+def test_source_facts_used_csv_preserves_underlying_rows(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    csv_text = (out_dir / "source_facts_used.csv").read_text(encoding="utf-8")
+    csv_rows = [line for line in csv_text.splitlines() if line and not line.startswith("fact_id,")]
+    csv_fact_ids = {line.split(",", 1)[0] for line in csv_rows}
+    # Fact 15 (chairs with article-only model) is suppressed in aggregates
+    # but the underlying source fact must still be in the CSV.
+    assert "15" in csv_fact_ids
+    # Fact 14 (sofa with "в кабинете") similarly preserved.
+    assert "14" in csv_fact_ids
+
+
+def test_discard_and_needs_human_still_excluded_from_main_report(tmp_path: Path) -> None:
+    facts_db = tmp_path / "facts.sqlite"
+    review_db = tmp_path / "review.sqlite"
+    _make_facts_db(
+        facts_db,
+        [
+            {
+                "id": 30,
+                "source_message_id": 3000,
+                "category": "sofas",
+                "item_type": "sofa",
+                "evidence_quote": "DISCARDED_SOFA",
+                "confidence": "high",
+            },
+            {
+                "id": 31,
+                "source_message_id": 3001,
+                "category": "hallway",
+                "item_type": "mirror",
+                "evidence_quote": "NEEDS_HUMAN_MIRROR",
+                "confidence": "high",
+            },
+        ],
+    )
+    _make_review_db(
+        review_db,
+        [
+            {
+                "fact_id": 30,
+                "source_message_id": 3000,
+                "original_category": "sofas",
+                "original_item_type": "sofa",
+                "decision": "discard",
+                "category_correct": 0,
+                "rationale_short": "certificate",
+            },
+            {
+                "fact_id": 31,
+                "source_message_id": 3001,
+                "original_category": "hallway",
+                "original_item_type": "mirror",
+                "decision": "needs_human",
+            },
+        ],
+    )
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    full_report = (out_dir / "father_report.md").read_text(encoding="utf-8")
+    short_report = (out_dir / "father_report_short.md").read_text(encoding="utf-8")
+    assert "DISCARDED_SOFA" not in full_report
+    assert "DISCARDED_SOFA" not in short_report
+    assert "NEEDS_HUMAN_MIRROR" not in full_report
+    assert "NEEDS_HUMAN_MIRROR" not in short_report
+
+
+def test_summary_and_quality_notes_mention_stage_31(tmp_path: Path) -> None:
+    facts_db, review_db = _stage_31_fixture(tmp_path)
+    out_dir = tmp_path / "father_report"
+    build_father_report(
+        facts_db=facts_db,
+        llm_review_dbs=[review_db],
+        out_dir=out_dir,
+        canonical_db=None,
+    )
+    summary = (out_dir / "father_report_summary.md").read_text(encoding="utf-8")
+    quality = (out_dir / "data_quality_notes.md").read_text(encoding="utf-8")
+    assert "father_report_short.md" in summary
+    assert "Display values suppressed" in summary
+    assert "Stage 3.1" in quality
+    assert "source_facts_used.csv" in quality
+
+
+def test_display_item_type_table_is_exposed() -> None:
+    # Sanity: the mapping itself is the public contract for Russian display labels.
+    assert "flooring_laminate" in DISPLAY_ITEM_TYPE_RU
+    assert DISPLAY_ITEM_TYPE_RU["coffee_table"] == "журнальный столик"
