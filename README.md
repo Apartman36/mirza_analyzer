@@ -378,18 +378,29 @@ Generated outputs:
 outputs/kitchen_palette_report/
   kitchen_palette_report.md
   kitchen_palette_short.md
+  kitchen_palette_short_clean.md
+  kitchen_palette_quality_notes.md
   kitchen_examples.csv
   kitchen_examples.jsonl
+  kitchen_examples_selected_clean.csv
   link_validation_todo.csv
   contact_sheets/
   images_by_example/
 ```
 
+Stage 4.1 adds a stricter report-layer quality score, suppresses noisy palette
+fragments in father-facing summaries, and writes `kitchen_palette_short_clean.md`
+plus `kitchen_examples_selected_clean.csv` for the examples actually used in the
+clean report. Categories are not padded to six examples; medium examples are
+used only when a category has fewer than three high-quality examples.
+
 The report is deterministic and local-first. It does not require LM Studio and
 does not call any LLM. It does not implement 3D rendering, apartment-specific
 design generation, HTML/PDF, OCR, VLM/image understanding, OpenRouter, new
 scraping, Telegram comments sync, RAG/chatbot, or a web dashboard. Telegram
-links in the report are candidates and require manual verification.
+links in the report are candidates and require manual verification. Photos and
+contact sheets are attached mechanically from the same post/message series;
+image content is not interpreted.
 
 ## Как проверить SQLite из Python
 

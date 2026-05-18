@@ -16,6 +16,7 @@ from mirza_analyzer.kitchen_palette_report import (
     create_contact_sheet,
     extract_designer,
     extract_object_name,
+    is_clean_kitchen_palette_value,
     load_kitchen_facts,
     resolve_project_post_id,
     KitchenProject,
@@ -355,6 +356,28 @@ def test_extracts_object_and_designer_or_default() -> None:
     assert default_source == "default_channel_author"
 
 
+def test_clean_kitchen_palette_value_filters_noise() -> None:
+    rejected = [
+        "Задача",
+        "Алюмика",
+        "на кухне из акрила. Функциональность и максимальное количество мест хранения",
+        "Задача: сделать квартиру под сдачу, чтобы заказчики были на полном доверии и все было рабочее",
+        "Арт",
+    ]
+    for value in rejected:
+        assert not is_clean_kitchen_palette_value(value)
+
+    preserved = [
+        "Дуб каселла + Капучино",
+        "Дуб каселла натуральный + Сапфир",
+        "орех Карини и МДФ белый нубук",
+        "5023 Доминикана",
+        "пластик Форст итальянский камень",
+    ]
+    for value in preserved:
+        assert is_clean_kitchen_palette_value(value)
+
+
 def test_palette_classification_rules() -> None:
     base = {
         "project_post_id": 1,
@@ -407,6 +430,9 @@ def test_build_report_groups_by_project_and_writes_outputs(tmp_path: Path) -> No
     assert (out_dir / "kitchen_examples.jsonl").exists()
     assert (out_dir / "kitchen_palette_report.md").exists()
     assert (out_dir / "kitchen_palette_short.md").exists()
+    assert (out_dir / "kitchen_palette_short_clean.md").exists()
+    assert (out_dir / "kitchen_palette_quality_notes.md").exists()
+    assert (out_dir / "kitchen_examples_selected_clean.csv").exists()
     assert (out_dir / "link_validation_todo.csv").exists()
 
     report = (out_dir / "kitchen_palette_report.md").read_text(encoding="utf-8")
@@ -420,13 +446,118 @@ def test_build_report_groups_by_project_and_writes_outputs(tmp_path: Path) -> No
 
     rows = list(csv.DictReader((out_dir / "kitchen_examples.csv").open(encoding="utf-8-sig")))
     selected = [row for row in rows if row["selected_for_report"] == "1"]
-    excluded = [row for row in rows if row["exclusion_reason"] == "low_confidence_or_bundle_only"]
+    excluded = [row for row in rows if row["exclusion_reason"] == "bundle_only"]
     assert len(selected) == 3
     assert len(excluded) == 1
     assert any(row["project_post_id"] == "200" and row["source_message_ids"] == "100;101" for row in rows)
+    for column in [
+        "quality_score",
+        "quality_tier",
+        "selected_for_clean_report",
+        "palette_summary_clean",
+        "has_clean_facade",
+        "has_countertop",
+        "has_backsplash",
+        "has_photo",
+        "object_name",
+        "designer",
+        "project_post_id",
+        "candidate_project_url",
+        "contact_sheet_path",
+    ]:
+        assert column in rows[0]
+
+    clean_rows = list(csv.DictReader((out_dir / "kitchen_examples_selected_clean.csv").open(encoding="utf-8-sig")))
+    assert len(clean_rows) == 3
+    assert all(row["selected_for_clean_report"] == "1" for row in clean_rows)
+
+    clean_short = (out_dir / "kitchen_palette_short_clean.md").read_text(encoding="utf-8")
+    for heading in [
+        "## 1. Светлое дерево + тёплый нейтральный фасад",
+        "## 2. Дерево + цветной/природный акцент",
+        "## 3. Светлый фасад + камень/фартук/столешница как акцент",
+    ]:
+        assert heading in clean_short
+    assert "Задача" not in clean_short
+    assert "на кухне из акрила" not in clean_short
+    assert "Алюмика" not in clean_short
+    assert "Фото приложены механически" in clean_short
+    assert "https://t.me/olya_homestaging/" in clean_short
+    assert "🟢 сильный пример" in clean_short
+
+    quality_notes = (out_dir / "kitchen_palette_quality_notes.md").read_text(encoding="utf-8")
+    assert "Suppression is display/report-layer only; source rows are preserved in CSV/JSONL." in quality_notes
 
     todo = (out_dir / "link_validation_todo.csv").read_text(encoding="utf-8-sig")
     assert "requires manual verification" in todo
+
+
+def test_bundle_only_and_no_clean_facade_are_not_selected_for_clean_report(tmp_path: Path) -> None:
+    img = _tiny_jpeg(tmp_path / "p.jpg")
+    facts_db = _make_facts_db(
+        tmp_path / "facts.sqlite",
+        [
+            {
+                "id": 1,
+                "source_message_id": 10,
+                "item_type": "bundle_purchase",
+                "finish": None,
+                "material": None,
+                "evidence_quote": "Кухня и шкафы комплектом",
+                "confidence": "low",
+            },
+            {
+                "id": 2,
+                "source_message_id": 20,
+                "item_type": "countertop",
+                "finish": None,
+                "material": "столешница Grandex камень",
+                "evidence_quote": "Столешница Grandex камень",
+            },
+        ],
+    )
+    canonical_db = _make_canonical_db(
+        tmp_path / "canonical.sqlite",
+        [
+            {"telegram_message_id": 10, "text_plain": "ЖК Bundle", "has_real_photo": True},
+            {"telegram_message_id": 20, "text_plain": "ЖК No facade\nсветлая кухня и каменная столешница", "has_real_photo": True},
+        ],
+        [
+            {"telegram_message_id": 10, "absolute_path": img},
+            {"telegram_message_id": 20, "absolute_path": img},
+        ],
+    )
+    out_dir = tmp_path / "out"
+    build_kitchen_palette_report(
+        facts_db=facts_db,
+        canonical_db=canonical_db,
+        out_dir=out_dir,
+        channel_username="olya_homestaging",
+        examples_per_category=6,
+        photos_per_example=1,
+    )
+
+    rows = list(csv.DictReader((out_dir / "kitchen_examples.csv").open(encoding="utf-8-sig")))
+    assert all(row["selected_for_clean_report"] == "0" for row in rows)
+    assert {row["exclusion_reason"] for row in rows} >= {"bundle_only", "no_clean_facade"}
+
+
+def test_category_does_not_force_six_examples(tmp_path: Path) -> None:
+    facts_db, canonical_db = _stage4_fixture(tmp_path)
+    out_dir = tmp_path / "out"
+    result = build_kitchen_palette_report(
+        facts_db=facts_db,
+        canonical_db=canonical_db,
+        out_dir=out_dir,
+        channel_username="olya_homestaging",
+        examples_per_category=6,
+        photos_per_example=2,
+    )
+    assert result.selected_by_category == {
+        "wood_neutral": 1,
+        "wood_nature_accent": 1,
+        "light_facade_stone_accent": 1,
+    }
 
 
 def test_cli_kitchen_palette_report_command(tmp_path: Path) -> None:
@@ -454,6 +585,8 @@ def test_cli_kitchen_palette_report_command(tmp_path: Path) -> None:
     assert code == 0
     assert (out_dir / "kitchen_palette_report.md").exists()
     assert (out_dir / "kitchen_palette_short.md").exists()
+    assert (out_dir / "kitchen_palette_short_clean.md").exists()
+    assert (out_dir / "kitchen_palette_quality_notes.md").exists()
 
 
 def test_contact_sheet_tiny_images_or_graceful_fallback(tmp_path: Path) -> None:

@@ -6,6 +6,7 @@ import math
 import re
 import shutil
 import sqlite3
+import stat
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,6 +68,10 @@ PALETTE_BY_ID = {category.category_id: category for category in PALETTE_CATEGORI
 PALETTE_ORDER = {category.category_id: index for index, category in enumerate(PALETTE_CATEGORIES)}
 CONFIDENCE_SORT_VALUE = {"low": 0, "medium": 1, "high": 2}
 CONFIDENCE_RU = {"high": "высокая", "medium": "средняя", "low": "низкая"}
+QUALITY_RU = {"high": "🟢 сильный пример", "medium": "🟡 средний пример", "low": "⚪ слабый кандидат"}
+MIN_HIGH_SCORE = 8
+MIN_MEDIUM_SCORE = 5
+MIN_HIGH_PER_CATEGORY = 3
 
 
 @dataclass(frozen=True)
@@ -139,15 +144,24 @@ class KitchenProject:
     prices: list[str]
     evidence_quotes: list[str]
     photo_paths: list[str]
+    kitchen_item_types: list[str] = field(default_factory=list)
     copied_photo_paths: list[str] = field(default_factory=list)
     contact_sheet_path: str | None = None
     palette_category_id: str | None = None
     palette_category_label: str | None = None
     secondary_palette_candidates: list[str] = field(default_factory=list)
     palette_summary: str | None = None
+    palette_summary_clean: str | None = None
     confidence: str = "low"
     confidence_reason: str = ""
+    quality_score: int = 0
+    quality_tier: str = "low"
+    has_clean_facade: bool = False
+    has_countertop: bool = False
+    has_backsplash: bool = False
+    has_photo: bool = False
     selected_for_report: bool = False
+    selected_for_clean_report: bool = False
     exclusion_reason: str | None = None
 
     @property
@@ -194,6 +208,8 @@ def build_kitchen_palette_report(
     images_dir = out_dir / "images_by_example"
     contact_dir.mkdir(parents=True, exist_ok=True)
     images_dir.mkdir(parents=True, exist_ok=True)
+    clear_generated_media_dir(contact_dir)
+    clear_generated_media_dir(images_dir)
 
     generated_at = utc_now_iso()
     kitchen_facts = load_kitchen_facts(facts_db)
@@ -246,6 +262,31 @@ def build_kitchen_palette_report(
         output_files=output_files,
         projects=projects,
     )
+
+
+def clear_generated_media_dir(path: Path) -> None:
+    for child in path.iterdir():
+        try:
+            if child.is_dir():
+                make_tree_writable(child)
+                shutil.rmtree(child)
+            elif child.is_file():
+                child.chmod(child.stat().st_mode | stat.S_IWRITE)
+                child.unlink()
+        except OSError:
+            continue
+
+
+def make_tree_writable(path: Path) -> None:
+    for child in path.rglob("*"):
+        try:
+            child.chmod(child.stat().st_mode | stat.S_IWRITE)
+        except OSError:
+            continue
+    try:
+        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+    except OSError:
+        pass
 
 
 def load_kitchen_facts(facts_db: Path) -> list[KitchenFact]:
@@ -452,12 +493,10 @@ def build_kitchen_projects(
             vendors=vendors,
             prices=prices,
             evidence_quotes=evidence_quotes,
+            kitchen_item_types=sorted({fact.item_type for fact in facts}),
             photo_paths=photo_paths,
         )
-        project.confidence, project.confidence_reason = score_project_confidence(
-            project=project,
-            facts=facts,
-        )
+        score_project_quality(project=project)
         projects.append(project)
 
     return sorted(projects, key=project_sort_key, reverse=True)
@@ -709,8 +748,8 @@ def fact_primary_value(fact: KitchenFact, *, include_evidence: bool = True) -> s
     if include_evidence:
         candidates.append(fact.evidence_quote)
     for candidate in candidates:
-        cleaned = _clean(candidate)
-        if cleaned and is_useful_report_value(cleaned):
+        cleaned = clean_kitchen_palette_value(candidate or "")
+        if cleaned and is_useful_report_value(cleaned) and is_clean_kitchen_palette_value(cleaned):
             return cleaned
     return None
 
@@ -725,11 +764,148 @@ def is_useful_report_value(value: str) -> bool:
     return lowered not in {"арт", "артикул", "кухня", "фартук", "столешница"}
 
 
+NOISE_EXACT_VALUES = {
+    "задача",
+    "арт",
+    "артикул",
+    "кухня",
+    "на кухне",
+    "в кухне",
+    "рабочее",
+    "панель",
+    "алюмика",
+}
+
+NOISE_PHRASE_TOKENS = (
+    "функциональность",
+    "максимальное количество мест хранения",
+    "заказчики на полном доверии",
+    "и панель мы тоже сделали",
+    "практически как на заказ",
+    "обратите внимание",
+    "задача:",
+    "на кухне из акрила",
+)
+
+PALETTE_MATERIAL_TOKENS = (
+    "дуб",
+    "каселла",
+    "орех",
+    "карини",
+    "гикори",
+    "чарльстон",
+    "капучино",
+    "латте",
+    "кашемир",
+    "меренга",
+    "нубук",
+    "сапфир",
+    "эбони",
+    "зелен",
+    "зелён",
+    "олив",
+    "графит",
+    "мдф",
+    "premium white",
+    "премиум вайт",
+    "бел",
+    "светл",
+    "пластик",
+    "доминикана",
+    "форст",
+    "камень",
+    "мрамор",
+    "grandex",
+    "laparet",
+    "сантехника онлайн",
+    "лемана",
+    "rusplitka",
+    "фартук",
+    "столешниц",
+    "плитк",
+)
+
+KITCHEN_RELEVANT_VENDOR_TOKENS = (
+    "mebel.in",
+    "мебел",
+    "леруа",
+    "лемана",
+    "сантехника онлайн",
+    "rusplitka",
+    "laparet",
+    "grandex",
+)
+
+
+def clean_kitchen_palette_value(value: str) -> str:
+    text = compact_whitespace(value or "")
+    text = text.strip(" \t\r\n\"'«».,:;—–-")
+    text = re.sub(r"\s+", " ", text)
+    if len(text) > 120:
+        text = re.split(r"[.!?]\s+|\n", text, maxsplit=1)[0].strip(" .,:;—–-")
+    return text
+
+
+def is_noise_kitchen_phrase(value: str) -> bool:
+    text = clean_kitchen_palette_value(value)
+    if not text:
+        return True
+    lowered = normalize_for_match(text)
+    if lowered in NOISE_EXACT_VALUES:
+        return True
+    if lowered.startswith("задача"):
+        return True
+    if any(token in lowered for token in NOISE_PHRASE_TOKENS):
+        return True
+    if len(text) > 90 and not (
+        ("+" in text or " и " in lowered)
+        and contains_any(lowered, PALETTE_MATERIAL_TOKENS)
+        and contains_any(lowered, ("фасад", "мдф", "дуб", "орех", "гикори", "каселла", "карини"))
+    ):
+        return True
+    if re.search(r"\b(сдать|аренд|продать|хранени[ея]|доверии|пожелани[ея])\b", lowered):
+        if not (contains_any(lowered, PALETTE_MATERIAL_TOKENS) and ("+" in text or " и " in lowered)):
+            return True
+    return False
+
+
+def is_clean_kitchen_palette_value(value: str) -> bool:
+    text = clean_kitchen_palette_value(value)
+    if not text or is_noise_kitchen_phrase(text):
+        return False
+    lowered = normalize_for_match(text)
+    if lowered == "алюмика":
+        return False
+    if len(text) < 2:
+        return False
+    return contains_any(lowered, PALETTE_MATERIAL_TOKENS) or bool(re.search(r"\b\d{3,5}\b", text))
+
+
+def is_strong_facade_phrase(value: str) -> bool:
+    text = clean_kitchen_palette_value(value)
+    if not text or is_noise_kitchen_phrase(text):
+        return False
+    lowered = normalize_for_match(text)
+    has_pair_signal = "+" in text or " и " in lowered or ";" in text or "," in text
+    has_facade_context = contains_any(lowered, ("фасад", "мдф", "дуб", "орех", "гикори", "каселла", "карини", "чарльстон"))
+    has_finish_signal = contains_any(
+        lowered,
+        WOOD_TOKENS + NEUTRAL_TOKENS + ACCENT_TOKENS + LIGHT_FACADE_TOKENS,
+    )
+    if contains_any(lowered, ("premium white", "премиум вайт")):
+        return True
+    return has_facade_context and has_finish_signal and (has_pair_signal or contains_any(lowered, ("premium white", "мдф", "нубук")))
+
+
 def parse_facade_parts(value: str | None) -> list[str]:
     if not value:
         return []
     parts = re.split(r"\s*(?:\+|,|;|/|\band\b|\bи\b)\s*", value, flags=re.IGNORECASE)
-    return unique_preserve_order(part.strip(" .,:;—–-") for part in parts if is_useful_report_value(part))
+    return unique_preserve_order(
+        clean_kitchen_palette_value(part)
+        for part in parts
+        if is_useful_report_value(part) and is_clean_kitchen_palette_value(part)
+    )
 
 
 def summarize_vendors(facts: Sequence[KitchenFact]) -> list[str]:
@@ -767,47 +943,82 @@ def summarize_evidence_quotes(facts: Sequence[KitchenFact]) -> list[str]:
     return unique_preserve_order(quotes)[:6]
 
 
-def score_project_confidence(
-    *,
-    project: KitchenProject,
-    facts: Sequence[KitchenFact],
-) -> tuple[str, str]:
-    item_types = {fact.item_type for fact in facts}
-    has_facade = "kitchen_facades" in item_types
-    has_counter_or_back = bool({"countertop", "backsplash"} & item_types)
-    direct_count = sum(1 for fact in facts if fact.item_type in DIRECT_KITCHEN_ITEM_TYPES)
-    has_project_context = project.object_source != "fallback_post_id" or project.designer_source == "credited_in_post"
-    has_photos = bool(project.photo_paths)
-    has_clean_quote = any(len(quote) <= 350 for quote in project.evidence_quotes)
-    only_general = not bool(item_types & DIRECT_KITCHEN_ITEM_TYPES)
+def score_project_quality(*, project: KitchenProject) -> None:
+    item_types = set(project.kitchen_item_types)
+    project.has_clean_facade = bool(project.facade_finish_raw and is_strong_facade_phrase(project.facade_finish_raw))
+    project.has_countertop = bool(project.countertop_raw and is_clean_kitchen_palette_value(project.countertop_raw))
+    project.has_backsplash = bool(project.backsplash_raw and is_clean_kitchen_palette_value(project.backsplash_raw))
+    project.has_photo = bool(project.photo_paths)
 
-    if (
-        has_facade
-        and has_counter_or_back
-        and has_project_context
-        and has_photos
-        and has_clean_quote
+    score = 0
+    reasons: list[str] = []
+    if project.has_clean_facade:
+        score += 4
+        reasons.append("clean_facade")
+    if project.has_countertop:
+        score += 2
+        reasons.append("countertop")
+    if project.has_backsplash:
+        score += 2
+        reasons.append("backsplash")
+    if project.wall_color:
+        score += 1
+        reasons.append("wall_color")
+    if project.flooring:
+        score += 1
+        reasons.append("flooring")
+    if project.object_source != "fallback_post_id":
+        score += 1
+        reasons.append("object")
+    else:
+        score -= 2
+        reasons.append("synthetic_object")
+    if project.designer_source == "credited_in_post":
+        score += 1
+        reasons.append("designer")
+    if project.has_photo:
+        score += 2
+        reasons.append("photo")
+    else:
+        score -= 2
+        reasons.append("no_photo")
+    if any(contains_any(normalize_for_match(vendor), KITCHEN_RELEVANT_VENDOR_TOKENS) for vendor in project.vendors):
+        score += 1
+        reasons.append("kitchen_vendor")
+
+    if item_types and item_types <= {"bundle_purchase"}:
+        score -= 4
+        reasons.append("bundle_only")
+    if item_types and item_types <= {"kitchen_other", "kitchen_accessory"}:
+        score -= 3
+        reasons.append("only_other_or_accessory")
+    if not project.has_clean_facade:
+        score -= 3
+        reasons.append("no_clean_facade")
+    if project.palette_summary_clean and is_noise_kitchen_phrase(project.palette_summary_clean):
+        score -= 5
+        reasons.append("noisy_palette_summary")
+    if any(len(quote) > 350 or is_noise_kitchen_phrase(quote) for quote in project.evidence_quotes[:2]):
+        score -= 2
+        reasons.append("long_or_task_quote")
+    if any(
+        normalize_for_match(value or "") in {"задача", "алюмика", "арт"}
+        for value in (project.facade_finish_raw, project.countertop_raw, project.backsplash_raw)
     ):
-        return (
-            "high",
-            "есть фасады и фартук/столешница, найден контекст проекта, есть фото и короткая цитата",
-        )
-    if only_general:
-        return (
-            "low",
-            "только bundle/general строки без прямых фактов по фасадам, фартуку или столешнице",
-        )
-    if has_facade and has_photos and has_clean_quote:
-        return (
-            "medium",
-            "есть прямой факт по фасадам и фото, но поддержка фартуком/столешницей или контекстом неполная",
-        )
-    if direct_count > 0 and has_clean_quote:
-        return (
-            "medium",
-            "есть прямой кухонный факт, но не хватает части подтверждений для высокой уверенности",
-        )
-    return "low", "контекст неполный: мало прямых фактов, фото или коротких цитат"
+        score -= 2
+        reasons.append("non_palette_token")
+
+    project.quality_score = score
+    strong_surface_pair = project.has_countertop and project.has_backsplash
+    if score >= MIN_HIGH_SCORE and project.has_clean_facade:
+        tier = "high"
+    elif score >= MIN_MEDIUM_SCORE and (project.has_clean_facade or strong_surface_pair):
+        tier = "medium"
+    else:
+        tier = "low"
+    project.quality_tier = tier
+    project.confidence = tier
+    project.confidence_reason = f"quality_score={score}; " + ", ".join(reasons)
 
 
 def classify_projects(projects: Sequence[KitchenProject]) -> None:
@@ -817,6 +1028,8 @@ def classify_projects(projects: Sequence[KitchenProject]) -> None:
         project.palette_category_label = PALETTE_BY_ID[category_id].label if category_id else None
         project.secondary_palette_candidates = secondary
         project.palette_summary = summary
+        project.palette_summary_clean = summarize_kitchen_palette(project)
+        score_project_quality(project=project)
 
 
 def classify_palette(project: KitchenProject) -> tuple[str | None, list[str], str | None]:
@@ -833,9 +1046,10 @@ def classify_palette(project: KitchenProject) -> tuple[str | None, list[str], st
         )
     )
 
-    wood = contains_any(facade_text or all_text, WOOD_TOKENS)
+    has_clean_facade = bool(project.facade_finish_raw and is_strong_facade_phrase(project.facade_finish_raw))
+    wood = has_clean_facade and contains_any(facade_text, WOOD_TOKENS)
     neutral = contains_any(facade_text, NEUTRAL_TOKENS)
-    accent = contains_any(facade_text or all_text, ACCENT_TOKENS)
+    accent = has_clean_facade and contains_any(facade_text, ACCENT_TOKENS)
     light = contains_any(facade_text, LIGHT_FACADE_TOKENS) or contains_any(
         all_text,
         LIGHT_FACADE_TOKENS,
@@ -848,11 +1062,11 @@ def classify_palette(project: KitchenProject) -> tuple[str | None, list[str], st
     )
 
     scores: dict[str, int] = {}
-    if wood and neutral:
+    if has_clean_facade and wood and neutral:
         scores["wood_neutral"] = 4
         if contains_any(facade_text, LIGHT_WOOD_TOKENS):
             scores["wood_neutral"] += 1
-    if wood and accent:
+    if has_clean_facade and wood and accent:
         scores["wood_nature_accent"] = 5
         if contains_any(facade_text, DARK_OR_COLOR_TOKENS):
             scores["wood_nature_accent"] += 1
@@ -983,15 +1197,25 @@ STONE_SURFACE_TOKENS = (
 
 
 def build_palette_summary(project: KitchenProject, category_id: str) -> str:
+    clean = summarize_kitchen_palette(project)
+    if clean:
+        return clean
+    return PALETTE_BY_ID[category_id].label
+
+
+def summarize_kitchen_palette(project: KitchenProject) -> str:
     bits: list[str] = []
-    if project.facade_finish_raw:
-        bits.append(f"фасады: {project.facade_finish_raw}")
-    if project.countertop_raw:
-        bits.append(f"столешница: {project.countertop_raw}")
-    if project.backsplash_raw:
-        bits.append(f"фартук: {project.backsplash_raw}")
-    if not bits:
-        return PALETTE_BY_ID[category_id].label
+    for label, value in (
+        ("фасады", project.facade_finish_raw),
+        ("столешница", project.countertop_raw),
+        ("фартук", project.backsplash_raw),
+    ):
+        if value and is_clean_kitchen_palette_value(value):
+            bits.append(f"{label}: {clean_kitchen_palette_value(value)}")
+    if project.wall_color and is_clean_kitchen_palette_value(project.wall_color):
+        bits.append(f"стены: {clean_kitchen_palette_value(project.wall_color)}")
+    if project.flooring and is_clean_kitchen_palette_value(project.flooring):
+        bits.append(f"пол: {clean_kitchen_palette_value(project.flooring)}")
     return "; ".join(bits)
 
 
@@ -1002,37 +1226,66 @@ def select_report_examples(
 ) -> None:
     selected_ids: set[int] = set()
     for category in PALETTE_CATEGORIES:
-        category_projects = [
+        high_projects = [
             project
             for project in projects
             if project.palette_category_id == category.category_id
-            and project.confidence in {"high", "medium"}
+            and project.quality_tier == "high"
             and project.project_post_id not in selected_ids
         ]
-        category_projects.sort(key=selection_sort_key, reverse=True)
-        for project in category_projects[:examples_per_category]:
+        high_projects.sort(key=selection_sort_key, reverse=True)
+        selected_for_category = high_projects[:examples_per_category]
+
+        if len(selected_for_category) < MIN_HIGH_PER_CATEGORY:
+            medium_projects = [
+                project
+                for project in projects
+                if project.palette_category_id == category.category_id
+                and project.quality_tier == "medium"
+                and project.project_post_id not in selected_ids
+                and project not in selected_for_category
+            ]
+            medium_projects.sort(key=selection_sort_key, reverse=True)
+            selected_for_category.extend(medium_projects[: examples_per_category - len(selected_for_category)])
+
+        for project in selected_for_category:
             project.selected_for_report = True
+            project.selected_for_clean_report = True
             project.exclusion_reason = None
             selected_ids.add(project.project_post_id)
 
     for project in projects:
         if project.selected_for_report:
             continue
-        if project.confidence == "low":
-            project.exclusion_reason = "low_confidence_or_bundle_only"
+        project.selected_for_clean_report = False
+        if project.quality_tier == "low":
+            project.exclusion_reason = project_exclusion_reason(project)
         elif not project.palette_category_id:
             project.exclusion_reason = "not_classified_by_palette_rules"
         else:
-            project.exclusion_reason = "category_quota_or_duplicate"
+            project.exclusion_reason = "not_needed_after_quality_cutoff_or_duplicate"
+
+
+def project_exclusion_reason(project: KitchenProject) -> str:
+    item_types = set(project.kitchen_item_types)
+    if item_types and item_types <= {"bundle_purchase"}:
+        return "bundle_only"
+    if not project.has_photo:
+        return "no_photo"
+    if not project.has_clean_facade and not (project.has_countertop and project.has_backsplash):
+        return "no_clean_facade"
+    if project.palette_summary_clean and is_noise_kitchen_phrase(project.palette_summary_clean):
+        return "noisy_palette_summary"
+    return "weak_evidence"
 
 
 def selection_sort_key(project: KitchenProject) -> tuple[int, int, int, int, int, str, int]:
     return (
-        CONFIDENCE_SORT_VALUE.get(project.confidence, 0),
+        project.quality_score,
+        CONFIDENCE_SORT_VALUE.get(project.quality_tier, 0),
         int(project.designer_source == "credited_in_post"),
         int(project.object_source != "fallback_post_id"),
         int(bool(project.contact_sheet_path or project.photo_paths)),
-        int(bool(project.facade_finish_raw and (project.countertop_raw or project.backsplash_raw))),
         project.date or "",
         project.project_post_id,
     )
@@ -1184,6 +1437,10 @@ def write_outputs(
     write_examples_csv(projects, csv_path)
     output_files.append(csv_path)
 
+    selected_csv_path = out_dir / "kitchen_examples_selected_clean.csv"
+    write_examples_csv([project for project in projects if project.selected_for_clean_report], selected_csv_path)
+    output_files.append(selected_csv_path)
+
     jsonl_path = out_dir / "kitchen_examples.jsonl"
     write_examples_jsonl(projects, jsonl_path)
     output_files.append(jsonl_path)
@@ -1211,6 +1468,24 @@ def write_outputs(
     )
     output_files.append(short_report_path)
 
+    clean_short_report_path = out_dir / "kitchen_palette_short_clean.md"
+    clean_short_report_path.write_text(
+        build_clean_short_report_markdown(projects=projects, generated_at=generated_at),
+        encoding="utf-8",
+    )
+    output_files.append(clean_short_report_path)
+
+    quality_notes_path = out_dir / "kitchen_palette_quality_notes.md"
+    quality_notes_path.write_text(
+        build_quality_notes_markdown(
+            projects=projects,
+            generated_at=generated_at,
+            kitchen_fact_count=kitchen_fact_count,
+        ),
+        encoding="utf-8",
+    )
+    output_files.append(quality_notes_path)
+
     return output_files
 
 
@@ -1234,6 +1509,14 @@ CSV_FIELDNAMES = [
     "vendor_summary",
     "price_summary",
     "evidence_quote",
+    "quality_score",
+    "quality_tier",
+    "selected_for_clean_report",
+    "palette_summary_clean",
+    "has_clean_facade",
+    "has_countertop",
+    "has_backsplash",
+    "has_photo",
     "confidence",
     "confidence_reason",
     "candidate_project_url",
@@ -1275,6 +1558,14 @@ def project_to_csv_row(project: KitchenProject) -> dict[str, Any]:
         "vendor_summary": "; ".join(project.vendors),
         "price_summary": "; ".join(project.prices),
         "evidence_quote": project.evidence_quotes[0] if project.evidence_quotes else "",
+        "quality_score": project.quality_score,
+        "quality_tier": project.quality_tier,
+        "selected_for_clean_report": int(project.selected_for_clean_report),
+        "palette_summary_clean": project.palette_summary_clean or "",
+        "has_clean_facade": int(project.has_clean_facade),
+        "has_countertop": int(project.has_countertop),
+        "has_backsplash": int(project.has_backsplash),
+        "has_photo": int(project.has_photo),
         "confidence": project.confidence,
         "confidence_reason": project.confidence_reason,
         "candidate_project_url": project.candidate_project_url,
@@ -1307,6 +1598,7 @@ def project_to_json_dict(project: KitchenProject) -> dict[str, Any]:
             "photo_paths": project.photo_paths,
             "copied_photo_paths": project.copied_photo_paths,
             "secondary_palette_candidates": project.secondary_palette_candidates,
+            "kitchen_item_types": project.kitchen_item_types,
             "area_type": project.area_type,
             "city": project.city,
         }
@@ -1385,10 +1677,10 @@ def build_full_report_markdown(
                 "",
             ]
         )
-        if len(examples) < 3:
+        if len(examples) < 6:
             lines.extend(
                 [
-                    "> Данных среднего/высокого качества меньше трёх, поэтому категорию нужно читать как слабее подтверждённую гипотезу.",
+                    "> В этой категории меньше примеров, потому что автоматически найденных сильных постов с явным сочетанием фасадов/столешницы/фартука меньше. Мы не добирали примеры шумными строками.",
                     "",
                 ]
             )
@@ -1427,12 +1719,13 @@ def build_example_markdown(project: KitchenProject, *, index: int, out_dir_name:
     lines.extend(
         [
             f"- Палитра: {project.palette_summary or project.palette_category_label or 'нет классификации'}.",
+            f"- Чистое резюме палитры: {project.palette_summary_clean or 'нет безопасного резюме для показа'}.",
             f"- Фасады: {project.facade_finish_raw or 'не найдено в извлечённых фактах'}.",
             f"- Столешница: {project.countertop_raw or 'не найдено в извлечённых фактах'}.",
             f"- Фартук: {project.backsplash_raw or 'не найдено в извлечённых фактах'}.",
             f"- Стены/пол: {format_wall_floor(project)}.",
             f"- Доказательство: «{short_quote(project.evidence_quotes[0] if project.evidence_quotes else '', 320)}».",
-            f"- Надёжность: {CONFIDENCE_RU.get(project.confidence, project.confidence)} — {project.confidence_reason}.",
+            f"- Надёжность: {QUALITY_RU.get(project.quality_tier, project.quality_tier)}; score={project.quality_score} — {project.confidence_reason}.",
             f"- Ссылка-кандидат: [{project.candidate_project_url}]({project.candidate_project_url}) ⚠ requires manual verification.",
         ]
     )
@@ -1549,13 +1842,161 @@ def build_short_report_markdown(
     return "\n".join(lines)
 
 
+def build_clean_short_report_markdown(
+    *,
+    projects: Sequence[KitchenProject],
+    generated_at: str,
+) -> str:
+    selected = [project for project in sorted_projects_for_output(projects) if project.selected_for_clean_report]
+    lines = [
+        "# Коротко: кухонные палитры Мирзабаевой — чистая версия",
+        "",
+        "## Как читать",
+        "- Включены только сильные и средние примеры; слабые кандидаты оставлены в CSV/quality notes.",
+        "- Telegram-ссылки помечены ⚠ и требуют ручной проверки.",
+        "- Фото приложены механически из того же поста/серии сообщений, без анализа изображения.",
+        "- Категории — гипотезы по тексту постов, а не визуальная классификация фотографий.",
+        "",
+    ]
+
+    for index, category in enumerate(PALETTE_CATEGORIES, start=1):
+        examples = [
+            project
+            for project in selected
+            if project.palette_category_id == category.category_id
+        ]
+        lines.extend([f"## {index}. {category.label}", "", category.short_description, ""])
+        if len(examples) < 6:
+            lines.extend(
+                [
+                    f"Пока найдено {len(examples)} сильных/средних примеров.",
+                    "В этой категории меньше примеров, потому что автоматически найденных сильных постов с явным сочетанием фасадов/столешницы/фартука меньше. Мы не добирали примеры шумными строками.",
+                    "",
+                ]
+            )
+        if category.category_id == "light_facade_stone_accent":
+            lines.extend(["Категория требует ручной проверки по фотографиям.", ""])
+        if not examples:
+            lines.extend(["Сейчас нет достаточно чистых примеров для показа.", ""])
+            continue
+        for project in examples:
+            lines.extend(build_clean_example_markdown(project))
+            lines.append("")
+
+    lines.extend(
+        [
+            "## Что проверить вручную",
+            "- открываются ли ссылки;",
+            "- действительно ли фото показывают кухню;",
+            "- совпадает ли фото с извлечённым сочетанием фасадов;",
+            "- дизайнер/хоумстейджер верно распознан;",
+            "- не повторяется ли один и тот же проект.",
+            "",
+            f"_Сгенерировано: {generated_at}._",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def build_clean_example_markdown(project: KitchenProject) -> list[str]:
+    photo_hint = ""
+    if project.contact_sheet_path:
+        photo_hint = relative_report_path(project.contact_sheet_path)
+    elif project.copied_photo_paths:
+        photo_hint = "; ".join(relative_report_path(path) for path in project.copied_photo_paths[:2])
+    elif project.photo_paths:
+        photo_hint = "; ".join(project.photo_paths[:2])
+
+    lines = [
+        f"### {project.example_id} — {project.object_name}",
+        f"- Уверенность: {QUALITY_RU.get(project.quality_tier, project.quality_tier)}; score={project.quality_score}.",
+        f"- Дизайнер/хоумстейджер: {project.designer}.",
+        f"- Дата: {format_date(project.date)}.",
+        f"- Палитра: {project.palette_summary_clean or 'нет безопасного резюме'}.",
+        f"- Фасады: {project.facade_finish_raw if project.has_clean_facade else 'не найдено чистое сочетание фасадов'}.",
+        f"- Столешница: {project.countertop_raw or 'не найдено в извлечённых фактах'}.",
+        f"- Фартук: {project.backsplash_raw or 'не найдено в извлечённых фактах'}.",
+        f"- Ссылка-кандидат: [{project.candidate_project_url}]({project.candidate_project_url}) ⚠.",
+    ]
+    if photo_hint:
+        lines.append(f"- Фото/contact sheet: `{photo_hint}`.")
+    else:
+        lines.append("- Фото/contact sheet: не найдено в локальной базе.")
+    return lines
+
+
+def build_quality_notes_markdown(
+    *,
+    projects: Sequence[KitchenProject],
+    generated_at: str,
+    kitchen_fact_count: int,
+) -> str:
+    selected = [project for project in projects if project.selected_for_clean_report]
+    excluded = [project for project in projects if not project.selected_for_clean_report]
+    reason_counts = Counter(project.exclusion_reason or "not_selected" for project in excluded)
+    lines = [
+        "# Kitchen palette quality notes",
+        "",
+        f"- Generated at: {generated_at}.",
+        f"- Total kitchen facts: {kitchen_fact_count}.",
+        f"- Project candidates: {len(projects)}.",
+        f"- Selected clean examples: {len(selected)}.",
+        f"- Excluded or downgraded examples: {len(excluded)}.",
+        "- Suppression is display/report-layer only; source rows are preserved in CSV/JSONL.",
+        "",
+        "## Selected clean examples per category",
+        "| category | selected | high | medium |",
+        "|---|---:|---:|---:|",
+    ]
+    for category in PALETTE_CATEGORIES:
+        examples = [project for project in selected if project.palette_category_id == category.category_id]
+        lines.append(
+            f"| {category.category_id} | {len(examples)} | "
+            f"{sum(1 for project in examples if project.quality_tier == 'high')} | "
+            f"{sum(1 for project in examples if project.quality_tier == 'medium')} |"
+        )
+
+    lines.extend(["", "## Exclusion reasons", "| reason | count |", "|---|---:|"])
+    if reason_counts:
+        for reason, count in reason_counts.most_common():
+            lines.append(f"| {escape_md(reason)} | {count} |")
+    else:
+        lines.append("| none | 0 |")
+
+    lines.extend(["", "## Known examples checked", "| example_id | status | score | tier | reason |", "|---|---|---:|---|---|"])
+    for example_id in ("KITCHEN-6187", "KITCHEN-7161", "KITCHEN-1248", "KITCHEN-4007"):
+        project = next((candidate for candidate in projects if candidate.example_id == example_id), None)
+        if project is None:
+            lines.append(f"| {example_id} | not present in candidate set |  |  |  |")
+            continue
+        status = "selected clean" if project.selected_for_clean_report else "excluded/downgraded"
+        lines.append(
+            f"| {project.example_id} | {status} | {project.quality_score} | "
+            f"{project.quality_tier} | {escape_md(project.exclusion_reason or project.confidence_reason)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Notes",
+            "- Low examples are not used in the father-facing clean report.",
+            "- Medium examples are used only when a category has fewer than three high-quality examples.",
+            "- Contact sheets and image paths are attached mechanically; image content is not interpreted.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def sorted_projects_for_output(projects: Sequence[KitchenProject]) -> list[KitchenProject]:
     return sorted(
         projects,
         key=lambda project: (
             int(not project.selected_for_report),
             PALETTE_ORDER.get(project.palette_category_id or "", 99),
-            -CONFIDENCE_SORT_VALUE.get(project.confidence, 0),
+            -CONFIDENCE_SORT_VALUE.get(project.quality_tier, 0),
+            -project.quality_score,
             project.date or "",
             project.project_post_id,
         ),
