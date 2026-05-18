@@ -27,4 +27,6 @@ outputs/llm_review/*
 !outputs/llm_review/.gitkeep
 outputs/llm_review_smoke/*
 !outputs/llm_review_smoke/.gitkeep
+outputs/father_report/*
+!outputs/father_report/.gitkeep
 .claude/

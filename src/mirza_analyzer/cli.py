@@ -7,6 +7,7 @@ from .audit import write_audit_report
 from .candidate_mining import write_candidate_outputs
 from .db import create_database_from_data_root, database_stats
 from .extraction import extract_facts
+from .father_report import DEFAULT_REPORT_TITLE, build_father_report
 from .llm_providers import LLMProviderError
 from .llm_review import run_llm_review
 from .sample import write_sample_posts
@@ -136,6 +137,57 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional canonical SQLite (outputs/mirza.sqlite) for source post excerpts.",
     )
     llm_review_parser.set_defaults(func=run_llm_review_command)
+
+    father_report_parser = subparsers.add_parser(
+        "father-report",
+        help="Stage 3: write a father-facing Markdown renovation cheat sheet.",
+    )
+    father_report_parser.add_argument("--facts-db", required=True, type=Path)
+    father_report_parser.add_argument("--out-dir", required=True, type=Path)
+    father_report_parser.add_argument(
+        "--llm-review-db",
+        action="append",
+        type=Path,
+        default=[],
+        help="Optional Stage 2.5 LLM review SQLite DB. Can be repeated.",
+    )
+    father_report_parser.add_argument(
+        "--canonical-db",
+        type=Path,
+        default=Path("outputs/mirza.sqlite"),
+    )
+    father_report_parser.add_argument(
+        "--format",
+        choices=["markdown"],
+        default="markdown",
+    )
+    father_report_parser.add_argument(
+        "--min-confidence",
+        choices=["low", "medium", "high"],
+        default="medium",
+    )
+    father_report_parser.add_argument("--include-low-confidence", action="store_true")
+    father_report_parser.add_argument("--max-examples-per-section", type=int, default=12)
+    father_report_parser.add_argument("--max-top-values", type=int, default=15)
+    father_report_parser.add_argument("--strict", dest="strict", action="store_true", default=True)
+    father_report_parser.add_argument("--no-strict", dest="strict", action="store_false")
+    father_report_parser.add_argument(
+        "--include-appendix",
+        dest="include_appendix",
+        action="store_true",
+        default=True,
+    )
+    father_report_parser.add_argument("--no-appendix", dest="include_appendix", action="store_false")
+    father_report_parser.add_argument("--report-title", default=DEFAULT_REPORT_TITLE)
+    father_report_parser.add_argument(
+        "--generated-note",
+        dest="generated_note",
+        action="store_true",
+        default=True,
+    )
+    father_report_parser.add_argument("--no-generated-note", dest="generated_note", action="store_false")
+    father_report_parser.add_argument("--language", default="ru")
+    father_report_parser.set_defaults(func=run_father_report_command)
 
     return parser
 
@@ -274,4 +326,39 @@ def run_llm_review_command(args: argparse.Namespace) -> int:
     print(f"Provider: {result.provider} | Model: {result.model}")
     print(f"Reviewed: {len(result.records)} | Skipped (resume): {len(result.skipped)}")
     print(f"Invalid/error: {result.invalid_count} | Retries: {result.retry_count}")
+    return 0
+
+
+def run_father_report_command(args: argparse.Namespace) -> int:
+    try:
+        result = build_father_report(
+            facts_db=args.facts_db,
+            out_dir=args.out_dir,
+            llm_review_dbs=args.llm_review_db,
+            canonical_db=args.canonical_db,
+            output_format=args.format,
+            min_confidence=args.min_confidence,
+            include_low_confidence=args.include_low_confidence,
+            max_examples_per_section=args.max_examples_per_section,
+            max_top_values=args.max_top_values,
+            strict=args.strict,
+            include_appendix=args.include_appendix,
+            report_title=args.report_title,
+            generated_note=args.generated_note,
+            language=args.language,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}")
+        return 2
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 2
+
+    print(f"Wrote father-facing Markdown report: {args.out_dir.resolve()}")
+    print(f"Effective facts used: {len(result.dataset.facts)}")
+    print(f"Facts excluded: {len(result.dataset.excluded)}")
+    print(f"LLM fix decisions applied: {result.dataset.applied_fix_count}")
+    print("Output files:")
+    for path in result.output_files:
+        print(f"  {path}")
     return 0

@@ -279,6 +279,59 @@ All `outputs/llm_review/*` and `outputs/llm_review_smoke/*` files are ignored by
 git. Deterministic facts in `outputs/extracted/` are never overwritten by this
 stage.
 
+## Stage 3: father-facing Markdown report
+
+Stage 3 writes the first human-readable renovation cheat sheet for the user's
+father. It reads the deterministic Stage 2 facts, optionally applies Stage 2.5
+LLM review decisions as a QA/enrichment layer, and writes Markdown only.
+
+The report is evidence-based: it summarizes recurring vendors, stores,
+materials, colors, facade combinations, models, prices where attached to a
+specific row, and compact evidence quotes. It does not create an
+apartment-specific design plan and does not infer anything from photos.
+
+Inputs:
+
+```text
+outputs/extracted/extracted_facts.sqlite
+outputs/llm_review_gptoss_mixed_100/llm_review.sqlite  # optional
+outputs/mirza.sqlite                                   # optional photo paths
+```
+
+Recommended command:
+
+```powershell
+python -m mirza_analyzer father-report `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --llm-review-db outputs/llm_review_gptoss_mixed_100/llm_review.sqlite `
+  --out-dir outputs/father_report `
+  --format markdown
+```
+
+Generated outputs:
+
+```text
+outputs/father_report/
+  father_report.md
+  father_report_summary.md
+  data_quality_notes.md
+  source_facts_used.csv
+  source_facts_excluded.csv
+  category_sections/
+    flooring.md
+    wall_colors.md
+    kitchens.md
+    chairs.md
+    tables.md
+    sofas.md
+    hallway.md
+    living_room_furniture.md
+```
+
+Stage 3 does **not** implement HTML, PDF, OCR, VLM/image analysis, Telegram
+comments sync, dashboards, OpenRouter, new scraping, or new LLM calls. All
+`outputs/father_report/*` files are generated artifacts and are ignored by git.
+
 ## Как проверить SQLite из Python
 
 ```python
