@@ -29,4 +29,5 @@ outputs/llm_review_smoke/*
 !outputs/llm_review_smoke/.gitkeep
 outputs/father_report/*
 !outputs/father_report/.gitkeep
+outputs/kitchen_palette_report/
 .claude/

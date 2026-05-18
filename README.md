@@ -340,6 +340,57 @@ Stage 3 does **not** implement HTML, PDF, OCR, VLM/image analysis, Telegram
 comments sync, dashboards, OpenRouter, new scraping, or new LLM calls. All
 `outputs/father_report/*` files are generated artifacts and are ignored by git.
 
+## Stage 4: kitchen palette report
+
+Stage 4 writes a deeper kitchen-focused Markdown report for manual review. It
+groups deterministic kitchen facts by project post, resolves candidate project
+links from Telegram text links such as `Артикулы проекта`, extracts cautious
+project metadata from the linked post, and classifies kitchens into three
+text-based palette hypotheses:
+
+- светлое дерево + тёплый нейтральный фасад;
+- дерево + цветной/природный акцент;
+- светлый фасад + камень/фартук/столешница как акцент.
+
+Recommended command:
+
+```powershell
+python -m mirza_analyzer kitchen-palette-report `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/kitchen_palette_report `
+  --channel-username olya_homestaging `
+  --examples-per-category 6 `
+  --photos-per-example 2 `
+  --format markdown
+```
+
+Inputs:
+
+```text
+outputs/extracted/extracted_facts.sqlite
+outputs/mirza.sqlite
+```
+
+Generated outputs:
+
+```text
+outputs/kitchen_palette_report/
+  kitchen_palette_report.md
+  kitchen_palette_short.md
+  kitchen_examples.csv
+  kitchen_examples.jsonl
+  link_validation_todo.csv
+  contact_sheets/
+  images_by_example/
+```
+
+The report is deterministic and local-first. It does not require LM Studio and
+does not call any LLM. It does not implement 3D rendering, apartment-specific
+design generation, HTML/PDF, OCR, VLM/image understanding, OpenRouter, new
+scraping, Telegram comments sync, RAG/chatbot, or a web dashboard. Telegram
+links in the report are candidates and require manual verification.
+
 ## Как проверить SQLite из Python
 
 ```python

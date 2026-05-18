@@ -8,6 +8,7 @@ from .candidate_mining import write_candidate_outputs
 from .db import create_database_from_data_root, database_stats
 from .extraction import extract_facts
 from .father_report import DEFAULT_REPORT_TITLE, build_father_report
+from .kitchen_palette_report import build_kitchen_palette_report
 from .llm_providers import LLMProviderError
 from .llm_review import run_llm_review
 from .sample import write_sample_posts
@@ -189,6 +190,23 @@ def build_parser() -> argparse.ArgumentParser:
     father_report_parser.add_argument("--language", default="ru")
     father_report_parser.set_defaults(func=run_father_report_command)
 
+    kitchen_palette_parser = subparsers.add_parser(
+        "kitchen-palette-report",
+        help="Stage 4: write an evidence-based kitchen palette Markdown report.",
+    )
+    kitchen_palette_parser.add_argument("--facts-db", required=True, type=Path)
+    kitchen_palette_parser.add_argument("--canonical-db", required=True, type=Path)
+    kitchen_palette_parser.add_argument("--out-dir", required=True, type=Path)
+    kitchen_palette_parser.add_argument("--channel-username", required=True)
+    kitchen_palette_parser.add_argument("--examples-per-category", type=int, default=6)
+    kitchen_palette_parser.add_argument("--photos-per-example", type=int, default=2)
+    kitchen_palette_parser.add_argument(
+        "--format",
+        choices=["markdown"],
+        default="markdown",
+    )
+    kitchen_palette_parser.set_defaults(func=run_kitchen_palette_report_command)
+
     return parser
 
 
@@ -358,6 +376,38 @@ def run_father_report_command(args: argparse.Namespace) -> int:
     print(f"Effective facts used: {len(result.dataset.facts)}")
     print(f"Facts excluded: {len(result.dataset.excluded)}")
     print(f"LLM fix decisions applied: {result.dataset.applied_fix_count}")
+    print("Output files:")
+    for path in result.output_files:
+        print(f"  {path}")
+    return 0
+
+
+def run_kitchen_palette_report_command(args: argparse.Namespace) -> int:
+    try:
+        result = build_kitchen_palette_report(
+            facts_db=args.facts_db,
+            canonical_db=args.canonical_db,
+            out_dir=args.out_dir,
+            channel_username=args.channel_username,
+            examples_per_category=args.examples_per_category,
+            photos_per_example=args.photos_per_example,
+            output_format=args.format,
+        )
+    except FileNotFoundError as exc:
+        print(f"error: {exc}")
+        return 2
+    except ValueError as exc:
+        print(f"error: {exc}")
+        return 2
+
+    print(f"Wrote kitchen palette report: {args.out_dir.resolve()}")
+    print(f"Kitchen facts read: {result.kitchen_fact_count}")
+    print(f"Project candidates: {result.project_candidate_count}")
+    print("Selected examples:")
+    for category_id, count in result.selected_by_category.items():
+        print(f"  {category_id}: {count}")
+    print(f"Contact sheets generated: {result.contact_sheet_count}")
+    print(f"Selected examples with fewer than requested photos: {result.examples_without_enough_photos}")
     print("Output files:")
     for path in result.output_files:
         print(f"  {path}")
