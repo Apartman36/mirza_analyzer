@@ -13,6 +13,24 @@
 
 Проект пока не делает LLM-извлечение, OCR, RAG, чатбот, дашборд, продуктовые рекомендации или отчеты по ремонту. Эти этапы должны идти только после проверки качества базы.
 
+## Карта этапов
+
+Пайплайн состоит из нескольких слоёв. Каждый следующий читает выходы предыдущего и
+ничего не переписывает в источнике истины.
+
+| Этап | Назначение | Главная команда | Главный выход |
+|------|------------|------------------|----------------|
+| Stage 1 | Аудит + загрузка Telegram-экспортов в одну SQLite | `audit`, `ingest`, `stats`, `sample` | `outputs/mirza.sqlite` |
+| Stage 1.5 | Детерминированный поиск кандидатов по категориям | `candidates` | `outputs/candidates/` |
+| Stage 2 / 2.1 | Детерминированное извлечение структурированных фактов + clean / needs_review | `extract-facts` | `outputs/extracted/extracted_facts.sqlite` |
+| Stage 2.5 | Опциональное LLM-ревью фактов (LM Studio или mock) | `llm-review` | `outputs/llm_review*/llm_review.sqlite` |
+| Stage 3 / 3.1 | Общий Markdown-отчёт для отца | `father-report` | `outputs/father_report/father_report_short.md` |
+| Stage 4 / 4.1 | Отчёт по кухонным палитрам + фото | `kitchen-palette-report` | `outputs/kitchen_palette_report/kitchen_palette_short_clean.md` |
+| Stage 5 (план) | Обмер квартиры + 2D/3D санити-вид | ещё не реализован | см. [docs/plans/stage5_3d_plan.md](docs/plans/stage5_3d_plan.md) |
+
+Карта всех выходных папок и того, что важно/временно/безопасно перегенерировать —
+в [docs/project_outputs.md](docs/project_outputs.md).
+
 ## Директории
 
 Сырые данные:
@@ -423,6 +441,102 @@ for post in conn.execute("""
     print(dict(post))
 ```
 
-## Следующий этап
+## Текущий рекомендованный workflow для отца
 
-После ручной проверки `audit.md`, `stats` и `sample_posts.md` можно добавлять отдельный слой тематической разметки: полы, цвета стен, кухни, фасады, стулья, столы, диваны, прихожие и мебель для гостиной. Этот репозиторий намеренно отделяет надежную загрузку данных от будущей аналитики.
+Минимальный путь от чистого клона до отчётов, которые можно показать отцу.
+
+```powershell
+# 1. Канонический SQLite из Telegram-экспортов (один раз)
+python -m mirza_analyzer ingest --data-root "C:\sarychev\mirzabaeva" --db outputs/mirza.sqlite
+
+# 2. Детерминированные факты (Stage 2 / 2.1)
+python -m mirza_analyzer extract-facts `
+  --db outputs/mirza.sqlite `
+  --out-dir outputs/extracted `
+  --source project_articles
+
+# 3. Общий отчёт для отца (Stage 3 / 3.1)
+python -m mirza_analyzer father-report `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --llm-review-db outputs/llm_review_gptoss_mixed_100/llm_review.sqlite `
+  --out-dir outputs/father_report `
+  --format markdown
+
+# 4. Кухонные палитры (Stage 4 / 4.1)
+python -m mirza_analyzer kitchen-palette-report `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/kitchen_palette_report `
+  --channel-username olya_homestaging `
+  --examples-per-category 6 `
+  --photos-per-example 2 `
+  --format markdown
+```
+
+`--llm-review-db` опционален. Если соответствующей папки нет, Stage 3 можно
+запускать без него — отчёт станет строго детерминированным.
+
+## Что отправить отцу сейчас
+
+Готовые «чистые» материалы, которые сейчас имеет смысл показывать:
+
+- [`outputs/father_report/father_report_short.md`](outputs/father_report/father_report_short.md) — короткий 2–4-страничный отчёт по всем категориям (главный документ);
+- [`outputs/father_report/father_report.md`](outputs/father_report/father_report.md) — полный детерминированный отчёт со всеми категориями (как референс);
+- [`outputs/kitchen_palette_report/kitchen_palette_short_clean.md`](outputs/kitchen_palette_report/kitchen_palette_short_clean.md) — очищенный отчёт по трём кухонным палитрам;
+- [`outputs/kitchen_palette_report/kitchen_palette_report.md`](outputs/kitchen_palette_report/kitchen_palette_report.md) — полный отчёт по кухням с примерами и метаданными;
+- [`outputs/kitchen_palette_report/kitchen_examples_selected_clean.csv`](outputs/kitchen_palette_report/kitchen_examples_selected_clean.csv) — таблица выбранных кухонных примеров для ручной сверки;
+- [`outputs/kitchen_palette_report/contact_sheets/`](outputs/kitchen_palette_report/contact_sheets/) и [`outputs/kitchen_palette_report/images_by_example/`](outputs/kitchen_palette_report/images_by_example/) — контактные листы и фото по проектам.
+
+Эти файлы не лежат в git (они в `.gitignore`), но генерируются командами выше.
+
+## Чему пока не доверять
+
+Что в репозитории есть, но **ещё не готово показывать как итог**:
+
+- любые «топ-N» подсчёты в полных отчётах без ручной сверки против исходных постов — Stage 2 детерминирован, но часть рядов уходит в `needs_review`;
+- ряды с `bundle_purchase` (групповые покупки): общая цена не делится по позициям и помечена как `needs_review`;
+- ссылки на проекты в `kitchen_palette_report.md` — это **кандидаты**, требуют ручной проверки (см. `link_validation_todo.csv`);
+- любая ссылка на содержимое фотографии — фото подцепляются **механически** по message-серии, никакого VLM/OCR нет;
+- сравнения моделей в `outputs/llm_review_*` — это эксперименты, не источник истины;
+- никаких 3D-визуализаций, AI-картинок интерьеров и автоматических планировок в проекте сейчас нет (см. план Stage 5).
+
+Все эти ограничения сознательные: проект сначала фиксирует надёжную базу, а уже
+потом продвигается к выводам.
+
+## Сгенерированные выходы и git
+
+Все папки и файлы в `outputs/` игнорируются git — см. `.gitignore`. В репозитории
+лежит только код, тесты, документация и `.gitkeep`-маркеры. Любая папка вида
+`outputs/<что-то>/` отсутствует на свежем клоне и пересобирается соответствующей
+командой. Подробная карта выходов — в
+[docs/project_outputs.md](docs/project_outputs.md).
+
+Сырые Telegram-экспорты в `C:\sarychev\mirzabaeva` тоже не в репозитории и
+read-only для всех команд проекта.
+
+## Тестирование
+
+Все тесты — детерминированные, без сети, без LM Studio, без OCR. LLM-провайдер
+заменяется in-process mock'ом.
+
+```powershell
+python -B -m pytest
+```
+
+Тесты покрывают: нормализацию текста, слияние сообщений, детекцию медиа,
+матчинг категорий, CLI-команды `candidates`, `extract-facts`, паттерны
+извлечения, `llm-review` (с mock-провайдером), `father-report` и
+`kitchen-palette-report`.
+
+## Текущее состояние
+
+- Stage 1, 1.5, 2, 2.1 — стабильные, детерминированные, покрыты тестами.
+- Stage 2.5 — опциональный; используется как QA-слой поверх Stage 2.
+- Stage 3 / 3.1 — стабильный, отчёт `father_report_short.md` пригоден для отца.
+- Stage 4 / 4.1 — стабильный, отчёт `kitchen_palette_short_clean.md` пригоден для отца.
+- Stage 5 (обмер квартиры + 2D/3D санити-вид) — **только план**, см. [docs/plans/stage5_3d_plan.md](docs/plans/stage5_3d_plan.md). Имплементации в репозитории нет.
+
+## Дополнительная документация
+
+- [docs/project_outputs.md](docs/project_outputs.md) — карта всех выходных файлов: что важно, что временное, что можно регенерировать.
+- [docs/plans/stage5_3d_plan.md](docs/plans/stage5_3d_plan.md) — план следующего этапа (обмер квартиры, JSON-схема, 2D санити-вид, Three.js-вьюер, опциональный Blender).
