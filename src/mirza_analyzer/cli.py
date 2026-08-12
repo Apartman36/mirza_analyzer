@@ -7,6 +7,14 @@ from .audit import write_audit_report
 from .candidate_mining import write_candidate_outputs
 from .db import create_database_from_data_root, database_stats
 from .extraction import extract_facts
+from .father_queries import (
+    FatherQueryRunResult,
+    generate_all_father_queries,
+    generate_father_appliances,
+    generate_father_furniture_makers,
+    generate_father_query_index,
+    generate_father_wall_paints,
+)
 from .father_report import DEFAULT_REPORT_TITLE, build_father_report
 from .kitchen_palette_report import build_kitchen_palette_report
 from .llm_providers import LLMProviderError
@@ -207,7 +215,60 @@ def build_parser() -> argparse.ArgumentParser:
     )
     kitchen_palette_parser.set_defaults(func=run_kitchen_palette_report_command)
 
+    father_query_index_parser = subparsers.add_parser(
+        "father-query-index",
+        help="Stage 6.0: build the deterministic targeted-query evidence index.",
+    )
+    _add_father_query_arguments(father_query_index_parser)
+    father_query_index_parser.set_defaults(func=run_father_query_index_command)
+
+    father_wall_paints_parser = subparsers.add_parser(
+        "father-wall-paints",
+        help="Stage 6: write targeted kitchen and wall-paint reports.",
+    )
+    _add_father_query_arguments(father_wall_paints_parser, include_kitchen_palette_dir=True)
+    father_wall_paints_parser.set_defaults(func=run_father_wall_paints_command)
+
+    father_appliances_parser = subparsers.add_parser(
+        "father-appliances",
+        help="Stage 6: write the built-in-appliance evidence report.",
+    )
+    _add_father_query_arguments(father_appliances_parser)
+    father_appliances_parser.set_defaults(func=run_father_appliances_command)
+
+    father_furniture_makers_parser = subparsers.add_parser(
+        "father-furniture-makers",
+        help="Stage 6: write the custom-furniture-maker evidence report.",
+    )
+    _add_father_query_arguments(father_furniture_makers_parser)
+    father_furniture_makers_parser.set_defaults(func=run_father_furniture_makers_command)
+
+    father_queries_all_parser = subparsers.add_parser(
+        "father-queries-all",
+        help="Stage 6: build the shared index and all targeted father reports.",
+    )
+    _add_father_query_arguments(father_queries_all_parser, include_kitchen_palette_dir=True)
+    father_queries_all_parser.set_defaults(func=run_all_father_queries_command)
+
     return parser
+
+
+def _add_father_query_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_kitchen_palette_dir: bool = False,
+) -> None:
+    parser.add_argument("--facts-db", required=True, type=Path)
+    parser.add_argument("--canonical-db", required=True, type=Path)
+    parser.add_argument("--out-dir", required=True, type=Path)
+    parser.add_argument("--channel-username", default="olya_homestaging")
+    if include_kitchen_palette_dir:
+        parser.add_argument(
+            "--kitchen-palette-dir",
+            type=Path,
+            default=Path("outputs/kitchen_palette_report"),
+            help="Optional Stage 4 output directory used only for existing contact-sheet references.",
+        )
 
 
 def run_audit(args: argparse.Namespace) -> None:
@@ -412,3 +473,95 @@ def run_kitchen_palette_report_command(args: argparse.Namespace) -> int:
     for path in result.output_files:
         print(f"  {path}")
     return 0
+
+
+def run_father_query_index_command(args: argparse.Namespace) -> int:
+    try:
+        result = generate_father_query_index(
+            facts_db=args.facts_db,
+            canonical_db=args.canonical_db,
+            out_dir=args.out_dir,
+            channel_username=args.channel_username,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 2
+    _print_father_query_result("Stage 6 evidence index", result)
+    return 0
+
+
+def run_father_wall_paints_command(args: argparse.Namespace) -> int:
+    try:
+        result = generate_father_wall_paints(
+            facts_db=args.facts_db,
+            canonical_db=args.canonical_db,
+            out_dir=args.out_dir,
+            channel_username=args.channel_username,
+            kitchen_palette_dir=args.kitchen_palette_dir,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 2
+    _print_father_query_result("Stage 6 kitchen and wall-paint reports", result)
+    return 0
+
+
+def run_father_appliances_command(args: argparse.Namespace) -> int:
+    try:
+        result = generate_father_appliances(
+            facts_db=args.facts_db,
+            canonical_db=args.canonical_db,
+            out_dir=args.out_dir,
+            channel_username=args.channel_username,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 2
+    _print_father_query_result("Stage 6 built-in-appliance report", result)
+    return 0
+
+
+def run_father_furniture_makers_command(args: argparse.Namespace) -> int:
+    try:
+        result = generate_father_furniture_makers(
+            facts_db=args.facts_db,
+            canonical_db=args.canonical_db,
+            out_dir=args.out_dir,
+            channel_username=args.channel_username,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 2
+    _print_father_query_result("Stage 6 furniture-maker report", result)
+    return 0
+
+
+def run_all_father_queries_command(args: argparse.Namespace) -> int:
+    try:
+        result = generate_all_father_queries(
+            facts_db=args.facts_db,
+            canonical_db=args.canonical_db,
+            out_dir=args.out_dir,
+            channel_username=args.channel_username,
+            kitchen_palette_dir=args.kitchen_palette_dir,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        print(f"error: {exc}")
+        return 2
+    _print_father_query_result("all Stage 6 targeted father reports", result)
+    return 0
+
+
+def _print_father_query_result(label: str, result: FatherQueryRunResult) -> None:
+    out_dir = result.out_dir
+    index = result.index
+    print(f"Wrote {label}: {out_dir.resolve()}")
+    print(f"Canonical messages indexed: {len(index.messages)}")
+    print(f"Kitchen project candidates: {len(index.kitchen_projects)}")
+    print(f"Wall-paint mentions: {len(index.wall_paint_mentions)}")
+    print(f"Appliance mentions: {len(index.appliance_mentions)}")
+    print(f"Furniture-maker mentions: {len(index.furniture_maker_mentions)}")
+    print(f"Project links requiring review: {len(index.project_linkage_review)}")
+    print("Output files:")
+    for path in result.output_files:
+        print(f"  {path}")

@@ -26,6 +26,7 @@
 | Stage 2.5 | Опциональное LLM-ревью фактов (LM Studio или mock) | `llm-review` | `outputs/llm_review*/llm_review.sqlite` |
 | Stage 3 / 3.1 | Общий Markdown-отчёт для отца | `father-report` | `outputs/father_report/father_report_short.md` |
 | Stage 4 / 4.1 | Отчёт по кухонным палитрам + фото | `kitchen-palette-report` | `outputs/kitchen_palette_report/kitchen_palette_short_clean.md` |
+| Stage 6 | Точные запросы: кухни/краски, встроенная техника, мебельщики | `father-queries-all` | `outputs/father_queries/father_queries_summary.md` |
 | Stage 5 (план) | Обмер квартиры + 2D/3D санити-вид | ещё не реализован | см. [docs/plans/stage5_3d_plan.md](docs/plans/stage5_3d_plan.md) |
 
 Карта всех выходных папок и того, что важно/временно/безопасно перегенерировать —
@@ -381,6 +382,14 @@ python -m mirza_analyzer kitchen-palette-report `
   --examples-per-category 6 `
   --photos-per-example 2 `
   --format markdown
+
+# 5. Точные запросы отца (Stage 6, только замороженный локальный снимок)
+python -m mirza_analyzer father-queries-all `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging `
+  --kitchen-palette-dir outputs/kitchen_palette_report
 ```
 
 Inputs:
@@ -419,6 +428,93 @@ scraping, Telegram comments sync, RAG/chatbot, or a web dashboard. Telegram
 links in the report are candidates and require manual verification. Photos and
 contact sheets are attached mechanically from the same post/message series;
 image content is not interpreted.
+
+## Stage 6: targeted father queries
+
+Stage 6 answers three focused questions from the existing local snapshot:
+wood-and-light-neutral kitchens with their wall paints, evidence for built-in
+appliances, and custom furniture makers with locally supported contacts. It
+first builds a deterministic evidence and project-linkage layer, then writes
+independent Russian-language reports. The canonical Telegram snapshot remains
+frozen at approximately 2026-05-17; Stage 6 reads the source databases without
+modifying them and does not update Telegram, scrape posts or comments, call an
+LLM or web API, or use OCR/VLM image analysis.
+
+Typical full run:
+
+```powershell
+python -m mirza_analyzer father-queries-all `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging
+```
+
+The shared index and each report can also be run independently:
+
+```powershell
+python -m mirza_analyzer father-query-index `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging
+
+python -m mirza_analyzer father-wall-paints `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging
+
+python -m mirza_analyzer father-appliances `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging
+
+python -m mirza_analyzer father-furniture-makers `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging
+```
+
+Generated outputs:
+
+```text
+outputs/father_queries/
+  father_queries.sqlite
+  father_queries_summary.md
+  kitchen_wall_colors.md
+  kitchen_wall_color_projects.csv
+  wall_paints_top3.md
+  wall_paints_all.csv
+  built_in_appliances.md
+  built_in_appliances.csv
+  furniture_makers.md
+  furniture_makers.csv
+  project_linkage_review.csv
+  source_link_validation.csv
+```
+
+The Markdown files are the father-facing answers; the CSV files retain source
+message IDs, evidence quotes, candidate Telegram URLs, and linkage provenance
+for audit. Exact-paint rankings count unique high-confidence projects rather
+than repeated mentions, while shade-family rankings require descriptive color
+evidence. Projects are never merged by ЖК name alone: uncertain matches remain
+in `project_linkage_review.csv`. Appliance and maker reports deliberately state
+when the corpus is sparse or a name is only likely, retail, or ambiguous.
+
+Every generated `https://t.me/olya_homestaging/<message_id>` link begins with
+status `unverified_requires_manual_verification`; review them through
+`source_link_validation.csv` before relying on them. Telegram comments are not
+present, some makers are unnamed, and the resulting maker list is therefore
+evidence-backed but not exhaustive. Stage 6 reports only evidence already in
+the frozen Telegram snapshot. Any future search of manufacturer sites, stores,
+current prices, or contact details is external web enrichment and must be kept
+separate from these Telegram-derived claims.
+
+All `outputs/father_queries/*` files are generated artifacts and are ignored by
+git.
 
 ## Как проверить SQLite из Python
 
@@ -486,6 +582,10 @@ python -m mirza_analyzer kitchen-palette-report `
 - [`outputs/kitchen_palette_report/kitchen_palette_report.md`](outputs/kitchen_palette_report/kitchen_palette_report.md) — полный отчёт по кухням с примерами и метаданными;
 - [`outputs/kitchen_palette_report/kitchen_examples_selected_clean.csv`](outputs/kitchen_palette_report/kitchen_examples_selected_clean.csv) — таблица выбранных кухонных примеров для ручной сверки;
 - [`outputs/kitchen_palette_report/contact_sheets/`](outputs/kitchen_palette_report/contact_sheets/) и [`outputs/kitchen_palette_report/images_by_example/`](outputs/kitchen_palette_report/images_by_example/) — контактные листы и фото по проектам.
+- [`outputs/father_queries/kitchen_wall_colors.md`](outputs/father_queries/kitchen_wall_colors.md) — двухцветные кухни и найденные цвета стен;
+- [`outputs/father_queries/wall_paints_top3.md`](outputs/father_queries/wall_paints_top3.md) — отдельные рейтинги точных кодов и словесных семейств оттенков;
+- [`outputs/father_queries/built_in_appliances.md`](outputs/father_queries/built_in_appliances.md) — честный отчёт по редким свидетельствам о встроенной технике;
+- [`outputs/father_queries/furniture_makers.md`](outputs/father_queries/furniture_makers.md) — подтверждённые/вероятные мебельщики отдельно от ритейлеров.
 
 Эти файлы не лежат в git (они в `.gitignore`), но генерируются командами выше.
 
@@ -526,7 +626,10 @@ python -B -m pytest
 Тесты покрывают: нормализацию текста, слияние сообщений, детекцию медиа,
 матчинг категорий, CLI-команды `candidates`, `extract-facts`, паттерны
 извлечения, `llm-review` (с mock-провайдером), `father-report` и
-`kitchen-palette-report`.
+`kitchen-palette-report`. Для Stage 6 отдельно проверяются приоритет Telegram-
+entities, локальная атрибуция URL/контактов, форматы кодов красок, консервативная
+связь проектов, дедупликация рейтингов, классы техники и мебельщиков, provenance
+в отчётах и все пять CLI-команд `father-*`.
 
 ## Текущее состояние
 
@@ -534,6 +637,7 @@ python -B -m pytest
 - Stage 2.5 — опциональный; используется как QA-слой поверх Stage 2.
 - Stage 3 / 3.1 — стабильный, отчёт `father_report_short.md` пригоден для отца.
 - Stage 4 / 4.1 — стабильный, отчёт `kitchen_palette_short_clean.md` пригоден для отца.
+- Stage 6 — детерминированный evidence-слой и четыре русскоязычных целевых отчёта готовы; неоднозначные связи и все кандидатные Telegram-ссылки оставлены на явную ручную проверку.
 - Stage 5 (обмер квартиры + 2D/3D санити-вид) — **только план**, см. [docs/plans/stage5_3d_plan.md](docs/plans/stage5_3d_plan.md). Имплементации в репозитории нет.
 
 ## Дополнительная документация

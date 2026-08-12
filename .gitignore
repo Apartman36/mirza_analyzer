@@ -30,4 +30,5 @@ outputs/llm_review_smoke/*
 outputs/father_report/*
 !outputs/father_report/.gitkeep
 outputs/kitchen_palette_report/
+outputs/father_queries/
 .claude/

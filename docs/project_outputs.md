@@ -14,7 +14,7 @@
 | Категория | Что это | Можно ли удалять | Регенерируется |
 |-----------|---------|-------------------|----------------|
 | Источник истины | Канонические данные, на которых строится всё остальное | Только если планируется немедленная регенерация | `ingest`, `extract-facts` |
-| Финальный отчёт | То, что показываем отцу | Только если есть свежая регенерация | `father-report`, `kitchen-palette-report` |
+| Финальный отчёт | То, что показываем отцу | Только если есть свежая регенерация | `father-report`, `kitchen-palette-report`, `father-queries-all` |
 | Промежуточный артефакт | Сводки, CSV, JSONL, использованные для отладки | Да, безопасно | Любая команда соответствующего этапа |
 | Экспериментальный прогон | Старые LLM-ревью с разными моделями и сэмплами | Да, безопасно | `llm-review` с нужными флагами |
 | Ручные проверки | Скрипты в `db_checks/` | Не удалять (это код, не выход) | — |
@@ -44,10 +44,15 @@
 | `outputs/kitchen_palette_report/kitchen_examples_selected_clean.csv` | Stage 4.1 | Чистая таблица отобранных кухонных примеров — для ручной сверки и Excel. |
 | `outputs/kitchen_palette_report/contact_sheets/` | Stage 4 | Контактные листы (несколько фото на одном изображении) по выбранным проектам. |
 | `outputs/kitchen_palette_report/images_by_example/` | Stage 4 | Папки с фото по каждому отобранному кухонному примеру. |
+| `outputs/father_queries/kitchen_wall_colors.md` | Stage 6 | Двухцветные кухни «дерево + светлый нейтральный» и доказанные цвета стен. |
+| `outputs/father_queries/wall_paints_top3.md` | Stage 6 | Отдельные рейтинги точных кодов и словесных семейств оттенков по уникальным проектам. |
+| `outputs/father_queries/built_in_appliances.md` | Stage 6 | Свидетельства по встроенной технике с явным указанием разреженности данных. |
+| `outputs/father_queries/furniture_makers.md` | Stage 6 | Подтверждённые и вероятные мебельщики отдельно от ритейлеров и неоднозначных имён. |
 
 > Бэкап рекомендации: если очередной прогон собрал «хороший» вариант, скопируйте
-> папку `outputs/father_report` и `outputs/kitchen_palette_report` в отдельную
-> архивную папку с датой, прежде чем запускать новые эксперименты.
+> папки `outputs/father_report`, `outputs/kitchen_palette_report` и
+> `outputs/father_queries` в отдельную архивную папку с датой, прежде чем
+> запускать новые эксперименты.
 
 ## Промежуточные артефакты
 
@@ -88,6 +93,15 @@ Stage 1.5 — детерминированные кандидаты по кат�
 
 Промежуточные данные Stage 4 (без `_clean`-фильтра). Регенерируются командой
 `kitchen-palette-report`.
+
+### `outputs/father_queries/`
+
+`father_queries.sqlite` — производный Stage 6 индекс доказательств; CSV-файлы
+содержат построчную provenance для красок, техники и мебельщиков.
+`project_linkage_review.csv` оставляет неоднозначные связи на ручную проверку, а
+`source_link_validation.csv` хранит кандидатные Telegram-ссылки со стартовым
+статусом `unverified_requires_manual_verification`. Вся папка детерминированно
+пересобирается командой `father-queries-all` и не изменяет исходные SQLite.
 
 ## Экспериментальные прогоны LLM-ревью
 
@@ -134,6 +148,7 @@ LLM-ревью, либо запускать `father-report` без `--llm-review
 - `outputs/extracted/extracted_facts.sqlite`
 - `outputs/father_report/` (целиком)
 - `outputs/kitchen_palette_report/` (целиком)
+- `outputs/father_queries/` (целиком, если нужен зафиксированный вариант целевых ответов)
 - `outputs/llm_review_gptoss_mixed_100/` (используется Stage 3)
 
 Всё остальное либо тривиально регенерируется, либо является историей экспериментов.
@@ -168,6 +183,14 @@ python -m mirza_analyzer kitchen-palette-report `
   --examples-per-category 6 `
   --photos-per-example 2 `
   --format markdown
+
+# 4. целевые запросы отца (Stage 6, без сети/LLM/OCR)
+python -m mirza_analyzer father-queries-all `
+  --facts-db outputs/extracted/extracted_facts.sqlite `
+  --canonical-db outputs/mirza.sqlite `
+  --out-dir outputs/father_queries `
+  --channel-username olya_homestaging `
+  --kitchen-palette-dir outputs/kitchen_palette_report
 ```
 
 `--llm-review-db` опционален: без него Stage 3 строится только на детерминированных
